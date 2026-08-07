@@ -35,8 +35,17 @@ class ImporterController < ApplicationController
     if params[:file].present?
       raw_data = params[:file].read
 
-      validate_encoding_mismatch(raw_data, params[:encoding])
-      return if flash[:error].present?
+      # If user select Windows-1251 encoding (added as 'W')
+      if params[:encoding] == 'W'
+        # Converts raw data from CP1251 to UTF-8
+        raw_data = raw_data.force_encoding('Windows-1251').encode('UTF-8', invalid: :replace, undef: :replace, replace: '')
+        # Redefine the encoding for the model, because the data inside iip.csv_data became UTF-8
+        iip.encoding = 'U' 
+      else
+        validate_encoding_mismatch(raw_data, params[:encoding])
+        return if flash[:error].present?
+      end
+
       iip.csv_data = raw_data
     end
     iip.save
@@ -624,9 +633,15 @@ class ImporterController < ApplicationController
   end
 
   def validate_encoding_mismatch(raw_data, encoding)
-    return if encoding == 'N'  # NKF auto-detect, skip validation
+    # If select 'N' (legacy from NKF), we switch to UTF-8 to avoid errors
+    if encoding == 'N' || encoding == 'U'
+      source_encoding = 'UTF-8'
+    elsif encoding == 'W'
+      source_encoding = 'Windows-1251'
+    else
+      source_encoding = { 'S' => 'Shift_JIS', 'EUC' => 'EUC-JP' }[encoding]
+    end
 
-    source_encoding = { 'U' => 'UTF-8', 'S' => 'Shift_JIS', 'EUC' => 'EUC-JP' }[encoding]
     return if source_encoding.nil?
 
     unless raw_data.dup.force_encoding(source_encoding).valid_encoding?
