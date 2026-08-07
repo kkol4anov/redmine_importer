@@ -4,15 +4,14 @@ User documentation for this plugin is
 at https://github.com/leovitch/redmine_importer/wiki.
 
 This plugin is functional now, including in multiprocess environments.
-The plugin has been tested on Redmine 4.2.9-stable.
+The plugin has been tested on Redmine 4.2.9.stable.
 
 Plugin is compatible with:
-
-Redmine 4.2.9.stable
-MariaDB 10.5.18
-Database adapter Mysql2
-Ruby 2.7.4-p191
-Rails 5.2.8.1
+- Redmine 4.2.9.stable
+- MariaDB 10.5.18
+- Database adapter Mysql2
+- Ruby 2.7.4-p191
+- Rails 5.2.8.1
 
 Newer and older versions might work but these haven't been tested so far.
 
