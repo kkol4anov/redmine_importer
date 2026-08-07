@@ -4,12 +4,19 @@ User documentation for this plugin is
 at https://github.com/leovitch/redmine_importer/wiki.
 
 This plugin is functional now, including in multiprocess environments.
-The plugin has been tested on Redmine 4.1 or higher
-The database is used for intermediate storage.
+The plugin has been tested on Redmine 4.2.9-stable.
+
+Plugin is compatible with:
+
+Redmine 4.2.9.stable
+MariaDB 10.5.18
+Database adapter Mysql2
+Ruby 2.7.4-p191
+Rails 5.2.8.1
+
+Newer and older versions might work but these haven't been tested so far.
 
 To install:
-- Prerequisites: Unless you are using ruby-1.9, you'll need the fastercsv gem (<code>gem install fastercsv</code> as root).
-  Versions 1.4 through 1.5.3 are tested.
 - Download the plugin to your 'plugins/' directory.  Be sure to maintain the correct folder name, 'redmine_importer'.
 - Run <code>rake redmine:plugins:migrate RAILS_ENV=production</code>
 - Restart your redmine as appropriate (e.g., <code>ruby script/rails server -e production</code>)
