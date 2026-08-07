@@ -624,9 +624,15 @@ class ImporterController < ApplicationController
   end
 
   def validate_encoding_mismatch(raw_data, encoding)
-    return if encoding == 'N'  # NKF auto-detect, skip validation
+    # If select 'N' (legacy from NKF), we switch to UTF-8 to avoid errors
+    if encoding == 'N' || encoding == 'U'
+      source_encoding = 'UTF-8'
+    elsif encoding == 'W'
+      source_encoding = 'Windows-1251'
+    else
+      source_encoding = { 'S' => 'Shift_JIS', 'EUC' => 'EUC-JP' }[encoding]
+    end
 
-    source_encoding = { 'U' => 'UTF-8', 'S' => 'Shift_JIS', 'EUC' => 'EUC-JP' }[encoding]
     return if source_encoding.nil?
 
     unless raw_data.dup.force_encoding(source_encoding).valid_encoding?
