@@ -38,7 +38,7 @@ class ImporterController < ApplicationController
       # If user select Windows-1251 encoding (added as 'W')
       if params[:encoding] == 'W'
         # Converts raw data from CP1251 to UTF-8
-        raw_data = raw_content.force_encoding('Windows-1251').encode('UTF-8', invalid: :replace, undef: :replace, replace: '')
+        raw_data = raw_data.force_encoding('Windows-1251').encode('UTF-8', invalid: :replace, undef: :replace, replace: '')
         # Redefine the encoding for the model, because the data inside iip.csv_data became UTF-8
         iip.encoding = 'U' 
       else
