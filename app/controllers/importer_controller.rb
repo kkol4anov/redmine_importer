@@ -35,8 +35,17 @@ class ImporterController < ApplicationController
     if params[:file].present?
       raw_data = params[:file].read
 
-      validate_encoding_mismatch(raw_data, params[:encoding])
-      return if flash[:error].present?
+      # If user select Windows-1251 encoding (added as 'W')
+      if params[:encoding] == 'W'
+        # Converts raw data from CP1251 to UTF-8
+        raw_data = raw_content.force_encoding('Windows-1251').encode('UTF-8', invalid: :replace, undef: :replace, replace: '')
+        # Redefine the encoding for the model, because the data inside iip.csv_data became UTF-8
+        iip.encoding = 'U' 
+      else
+        validate_encoding_mismatch(raw_data, params[:encoding])
+        return if flash[:error].present?
+      end
+
       iip.csv_data = raw_data
     end
     iip.save
