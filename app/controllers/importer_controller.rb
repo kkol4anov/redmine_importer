@@ -299,41 +299,43 @@ class ImporterController < ApplicationController
 
         # Issue relations
         IssueRelation::TYPES.each_pair do |rtype, _rinfo|
-          other_value = row[@attrs_map["issue_relation-#{rtype}"]]
-          next if other_value.blank?
+          raw_value = row[@attrs_map["issue_relation-#{rtype}"]]
+          next if raw_value.blank?
 
-          begin
-            # When unique_attr is 'standard_field-id' and use_issue_id is false,
-            # use cache-based lookup to support deferred reference resolution.
-            if unique_attr == 'standard_field-id' && !use_issue_id
-              other_issue = @issue_by_unique_attr[other_value]
-              unless other_issue
-                # Target not in cache yet - register callback for deferred creation
-                @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
-                next
+          raw_value.split(',').map(&:strip).reject(&:blank?).each do |other_value|
+            begin
+              # When unique_attr is 'standard_field-id' and use_issue_id is false,
+              # use cache-based lookup to support deferred reference resolution.
+              if unique_attr == 'standard_field-id' && !use_issue_id
+                other_issue = @issue_by_unique_attr[other_value]
+                unless other_issue
+                  # Target not in cache yet - register callback for deferred creation
+                  @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
+                  next
+                end
+              else
+                other_issue = issue_for_unique_attr(unique_attr, other_value, row)
               end
-            else
-              other_issue = issue_for_unique_attr(unique_attr, other_value, row)
-            end
 
-            already_related = issue.relations.any? do |r|
-              (r.other_issue(issue).id == other_issue.id) \
-                && (r.relation_type_for(issue) == rtype)
-            end
-            next if already_related
+              already_related = issue.relations.any? do |r|
+                (r.other_issue(issue).id == other_issue.id) \
+                  && (r.relation_type_for(issue) == rtype)
+              end
+              next if already_related
 
-            relation = IssueRelation.new(issue_from: issue,
-                                         issue_to: other_issue,
-                                         relation_type: rtype)
-            unless relation.save
-              @messages << "Warning: Failed to create relation: #{relation.errors.full_messages.join(', ')}"
+              relation = IssueRelation.new(issue_from: issue,
+                                          issue_to: other_issue,
+                                          relation_type: rtype)
+              unless relation.save
+                @messages << "Warning: Failed to create relation: #{relation.errors.full_messages.join(', ')}"
+              end
+            rescue NoIssueForUniqueValue
+              # Register callback for deferred relation creation
+              # Target issue may appear later in CSV
+              @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
+            rescue MultipleIssuesForUniqueValue
+              @messages << "Warning: Multiple matches for relation target '#{other_value}'"
             end
-          rescue NoIssueForUniqueValue
-            # Register callback for deferred relation creation
-            # Target issue may appear later in CSV
-            @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
-          rescue MultipleIssuesForUniqueValue
-            @messages << "Warning: Multiple matches for relation target '#{other_value}'"
           end
         end
 
@@ -765,6 +767,10 @@ class ImporterController < ApplicationController
     end
 
     if use_issue_id && unique_attr == 'standard_field-id'
+      unless attr_value.to_s.match?(/\A\d+\z/)
+        raise NoIssueForUniqueValue,
+          "Value '#{attr_value}' is not a valid issue id"
+      end
       issues = [Issue.find_by_id(attr_value)].compact
     else
       # Use IssueQuery class Redmine >= 2.3.0
