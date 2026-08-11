@@ -352,29 +352,18 @@ class ImporterController < ApplicationController
 
   def translate_unique_attr(issue, unique_field, unique_attr, unique_attr_checked)
     # translate unique_attr if it's a custom field -- only on the first issue
-    return unique_attr if unique_attr_checked || unique_field.blank? || unique_attr.blank?
-
-    STANDARD_FIELD_TO_FILTER = {
-      'standard_field-id' => 'issue_id',
-      'standard_field-subject' => 'subject',
-      'standard_field-status' => 'status_id',
-      'standard_field-tracker' => 'tracker_id',
-      'standard_field-assigned_to' => 'assigned_to_id',
-      'standard_field-fixed_version' => 'fixed_version_id',
-      'standard_field-category' => 'category_id',
-      'standard_field-author' => 'author_id',
-      'standard_field-priority' => 'priority_id',
-      'standard_field-parent_issue' => 'parent_id',
-  }.freeze
-
-    if unique_attr.start_with?('custom_field-')
-      cf_name = unique_attr.delete_prefix('custom_field-')
-      cf = (issue.available_custom_fields | @project.all_issue_custom_fields).detect { |c| c.name == cf_name }
-      raise "Custom field '#{cf_name}' not found" if cf.nil?
-      return "cf_#{cf.id}"
+    unless unique_attr_checked
+      if unique_field && !ISSUE_ATTRS.include?(unique_attr.to_sym)
+        issue.available_custom_fields.each do |cf|
+          if cf.name == unique_attr
+            unique_attr = "cf_#{cf.id}"
+            break
+          end
+        end
+      end
+      unique_attr_checked = true
     end
-
-    STANDARD_FIELD_TO_FILTER.fetch(unique_attr, unique_attr)
+    unique_attr
   end
 
   def handle_issue_update(issue, row, author, status, update_other_project, journal_field, unique_attr, unique_field, ignore_non_exist, update_issue)
