@@ -5,6 +5,7 @@ require 'tempfile'
 
 MultipleIssuesForUniqueValue = Class.new(RuntimeError)
 NoIssueForUniqueValue = Class.new(RuntimeError)
+UnusableUniqueField = Class.new(RuntimeError)
 
 class ImporterController < ApplicationController
   using RedmineImporter::Patches::Redmine51ToFsMethodPatch
@@ -14,6 +15,19 @@ class ImporterController < ApplicationController
                    author description category priority tracker status
                    start_date due_date done_ratio estimated_hours
                    parent_issue watchers is_private].freeze
+
+  STANDARD_FIELD_TO_FILTER = {
+  'standard_field-id' => 'issue_id',
+  'standard_field-subject' => 'subject',
+  'standard_field-status' => 'status_id',
+  'standard_field-tracker' => 'tracker_id',
+  'standard_field-assigned_to' => 'assigned_to_id',
+  'standard_field-fixed_version' => 'fixed_version_id',
+  'standard_field-category' => 'category_id',
+  'standard_field-author' => 'author_id',
+  'standard_field-priority' => 'priority_id',
+  'standard_field-parent_issue' => 'parent_id',
+}.freeze
 
   def index; end
 
@@ -89,8 +103,6 @@ class ImporterController < ApplicationController
     flash.delete(:error)
 
     init_globals
-    # Used to optimize some work that has to happen inside the loop
-    unique_attr_checked = false
 
     # Retrieve saved import data
     iip = ImportInProgress.find_by_user_id(User.current.id)
@@ -138,6 +150,16 @@ class ImporterController < ApplicationController
                                  column: l("label_#{t}".to_sym))
              end
            end
+      end
+    end
+
+    # translate unique attr to the filter name and checking of usability
+    if unique_attr.present?
+      unique_attr = translate_unique_attr(unique_field, unique_attr)
+      if unique_attr.nil? ||
+        (unique_attr.start_with?('standatd_field-') && unique_attr != 'standard_field-id')
+        flash[:error] = l(:error_unique_field_not_usable, field: fields_map[unique_field])
+        return
       end
     end
 
@@ -227,8 +249,6 @@ class ImporterController < ApplicationController
       end
 
       begin
-        unique_attr = translate_unique_attr(issue, unique_field, unique_attr, unique_attr_checked)
-
         issue, journal = handle_issue_update(issue, row, author, status, update_other_project, journal_field,
                                              unique_attr, unique_field, ignore_non_exist, update_issue)
 
@@ -350,20 +370,18 @@ class ImporterController < ApplicationController
     end
   end
 
-  def translate_unique_attr(issue, unique_field, unique_attr, unique_attr_checked)
+  def translate_unique_attr(unique_field, unique_attr)
+    # "custom_field-<name>" -> "cf_<id>", "standard_field-<attr>" -> filter name
     # translate unique_attr if it's a custom field -- only on the first issue
-    unless unique_attr_checked
-      if unique_field && !ISSUE_ATTRS.include?(unique_attr.to_sym)
-        issue.available_custom_fields.each do |cf|
-          if cf.name == unique_attr
-            unique_attr = "cf_#{cf.id}"
-            break
-          end
-        end
-      end
-      unique_attr_checked = true
+    return unique_attr if unique_field.blank? || unique_attr.blank?
+
+    if unique_attr.start_with?('custom_field-')
+      cf_name = unique_attr.delete_prefix('custom_field-')
+      cf = @project.all_issue_custom_fields.detect { |c| c.name == cf_name }
+      return cf && "cf_#{cf.id}"
     end
-    unique_attr
+    
+    STANDARD_FIELD_TO_FILTER.fetch(unique_attr, unique_attr)
   end
 
   def handle_issue_update(issue, row, author, status, update_other_project, journal_field, unique_attr, unique_field, ignore_non_exist, update_issue)
@@ -762,6 +780,11 @@ class ImporterController < ApplicationController
       query.add_filter('status_id', '*', [1])
       query.add_filter(unique_attr, '=', [attr_value])
 
+      unless query.filters.key?(unique_attr)
+        raise UnusableUniqueField,
+          "Field '#{unique_attr}' is not available as a query filter"
+      end
+
       issues = Issue.joins([:project])
                     .includes(%i[assigned_to status tracker project priority
                                  category fixed_version])
@@ -770,10 +793,7 @@ class ImporterController < ApplicationController
     end
 
     if issues.size > 1
-      @failed_count += 1
-      @failed_issues[@failed_count] = row_data
-      @messages << l(:warning_duplicate_unique_value, attr: unique_attr, value: attr_value,
-                                                        issue_num: @failed_count)
+      # counting and message are on a caller side
       raise MultipleIssuesForUniqueValue, "Unique field #{unique_attr} with" \
         " value '#{attr_value}' has duplicate record"
     elsif issues.empty? || issues[0].nil?
