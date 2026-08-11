@@ -5,6 +5,10 @@ module RedmineImporter
   # that haven't been imported yet (e.g., parent issues or relations
   # defined later in the CSV file).
   class DeferredCallbacks
+    # Separator used to combine the value of the unique column with the values
+    # of the custom fields narrowing the scope of the matching.
+    KEY_SEPARATOR = "\u001F"
+
     def initialize(issue_cache:, messages:)
       @pending = {}
       @issue_cache = issue_cache
@@ -31,13 +35,18 @@ module RedmineImporter
     def warn_unresolved
       @pending.each do |unique_value, callbacks|
         callbacks.each do |name, _args|
-          @messages << "Warning: Deferred #{name} for '#{unique_value}' " \
+          @messages << "Warning: Deferred #{name} for '#{display_value(unique_value)}' " \
                        'was never resolved (target issue not found in CSV)'
         end
       end
     end
 
     private
+
+    # Strips the scope part of the key for the messages
+    def display_value(key)
+      key.to_s.split(KEY_SEPARATOR).first
+    end
 
     # Callback: Sets parent for a previously imported issue.
     def set_parent_callback(parent_issue, child_unique_value)
@@ -48,7 +57,7 @@ module RedmineImporter
       child_issue.reload
       child_issue.parent_issue_id = parent_issue.id
       unless child_issue.save
-        @messages << "Warning: Failed to set parent for issue '#{child_unique_value}': " \
+        @messages << "Warning: Failed to set parent for issue '#{display_value(child_unique_value)}': " \
                      "#{child_issue.errors.full_messages.join(', ')}"
       end
     end

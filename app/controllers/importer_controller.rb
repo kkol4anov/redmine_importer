@@ -96,6 +96,17 @@ class ImporterController < ApplicationController
       @attrs.push([l_or_humanize(rinfo[:name]), "issue_relation-#{rtype}"])
     end
     @attrs.sort!
+
+    # Custom fields that can be used to narrow the scope in which
+    # the values of the unique column are matched.
+    # Only fields flagged as "Used as a filter" can be used, the others
+    # are shown as disabled options.
+    @scope_attrs = @project.all_issue_custom_fields.map do |cfield|
+      [cfield.name, "custom_field-#{cfield.name}"]
+    end.sort
+    @disabled_scope_attrs = @project.all_issue_custom_fields.reject(&:is_filter?).map do |cfield|
+      "custom_field-#{cfield.name}"
+    end
   end
 
   def result
@@ -152,6 +163,11 @@ class ImporterController < ApplicationController
            end
       end
     end
+
+    # custom fields narrowing the scope of the unique values matching
+    # (not applicable when issues are matched by their id)
+    @unique_scope_fields = build_unique_scope_fields(unique_attr)
+    return if flash[:error].present?
 
     # translate unique attr to the filter name and checking of usability
     if unique_attr.present?
@@ -280,8 +296,11 @@ class ImporterController < ApplicationController
       end
 
       if issue_saved
-        @issue_by_unique_attr[row[unique_field]] = issue if unique_field
-        @deferred_callbacks.execute(row[unique_field], issue) if unique_field
+        if unique_field
+          row_key = unique_attr_cache_key(row[unique_field], row)
+          @issue_by_unique_attr[row_key] = issue
+          @deferred_callbacks.execute(row_key, issue)
+        end
 
         if send_emails
           if update_issue
@@ -307,10 +326,13 @@ class ImporterController < ApplicationController
               # When unique_attr is 'standard_field-id' and use_issue_id is false,
               # use cache-based lookup to support deferred reference resolution.
               if unique_attr == 'standard_field-id' && !use_issue_id
-                other_issue = @issue_by_unique_attr[other_value]
+                other_issue = @issue_by_unique_attr[unique_attr_cache_key(other_value, row)]
                 unless other_issue
                   # Target not in cache yet - register callback for deferred creation
-                  @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
+                  @deferred_callbacks.register(unique_attr_cache_key(other_value, row),
+                                               :add_relation,
+                                               unique_attr_cache_key(row[unique_field], row),
+                                               rtype)
                   next
                 end
               else
@@ -332,7 +354,10 @@ class ImporterController < ApplicationController
             rescue NoIssueForUniqueValue
               # Register callback for deferred relation creation
               # Target issue may appear later in CSV
-              @deferred_callbacks.register(other_value, :add_relation, row[unique_field], rtype)
+              @deferred_callbacks.register(unique_attr_cache_key(other_value, row),
+                                           :add_relation,
+                                           unique_attr_cache_key(row[unique_field], row),
+                                           rtype)
             rescue MultipleIssuesForUniqueValue
               @messages << "Warning: Multiple matches for relation target '#{other_value}'"
             end
@@ -386,6 +411,119 @@ class ImporterController < ApplicationController
     STANDARD_FIELD_TO_FILTER.fetch(unique_attr, unique_attr)
   end
 
+  # Builds the list of the custom fields chosen by the user to narrow down
+  # the scope in which the unique values are matched.
+  # Every entry is a hash: { name:, filter:, column:, custom_field: }
+  #
+  # Returns [] when the scope is not applicable: the issues are matched by
+  # their id (id is globally unique, no scope is needed) or nothing selected.
+  # Returns nil and sets flash[:error] when the selection is not usable.
+  def build_unique_scope_fields(raw_unique_attr)
+    selected = Array(params[:unique_scope_fields]).reject(&:blank?).uniq
+    return [] if selected.empty?
+    return [] if raw_unique_attr.blank? || raw_unique_attr == 'standard_field-id'
+
+    query = new_importer_query
+
+    selected.filter_map do |field_key|
+      # only custom fields can be used as a scope
+      unless field_key.to_s.start_with?('custom_field-')
+        flash[:error] = l(:error_unique_scope_field_not_usable, field: field_key)
+        return nil
+      end
+
+      cf_name = field_key.delete_prefix('custom_field-')
+      cf = @project.all_issue_custom_fields.detect { |c| c.name == cf_name }
+
+      if cf.nil? || !query.available_filters.key?("cf_#{cf.id}")
+        flash[:error] = l(:error_unique_scope_field_not_usable, field: cf_name)
+        return nil
+      end
+
+      # the value of the scope field is taken from the CSV row,
+      # so the field has to be mapped to a column
+      column = @attrs_map[field_key]
+      if column.blank?
+        flash[:error] = l(:error_unique_scope_field_not_mapped, field: cf_name)
+        return nil
+      end
+
+      # the unique column itself narrows nothing down
+      next if field_key == raw_unique_attr
+
+      { name: cf.name, filter: "cf_#{cf.id}", column: column, custom_field: cf }
+    end
+  end
+
+  # Query filters ([filter_name, operator, values]) built from the values
+  # of the scope custom fields in the given row.
+  def unique_scope_filters(row)
+    return [] if @unique_scope_fields.blank? || row.nil?
+
+    @unique_scope_fields.map do |field|
+      raw_value = row[field[:column]].to_s.strip
+
+      if raw_value.blank?
+        # an empty value in the CSV means "issues without any value"
+        [field[:filter], '!*', ['']]
+      else
+        [field[:filter], '=', [scope_filter_value(field[:custom_field], raw_value)]]
+      end
+    end
+  end
+
+  # Custom field values are stored (and filtered) by id for some formats,
+  # so the human readable value of the CSV has to be translated first.
+  def scope_filter_value(custom_field, value)
+    case custom_field.field_format
+    when 'user'
+      user_id_for_login!(value).to_s
+    when 'version'
+      version_id_for_name!(@project, value, false).to_s
+    when 'enumeration'
+      enumeration_id_for_name!(custom_field, value).to_s
+    when 'bool'
+      convert_to_0_or_1(value) || value
+    when 'date'
+      value.to_date.to_fs(:db)
+    else
+      value
+    end
+  end
+
+  # Cache key of an issue: the unique value alone when no scope is used
+  # (keeps the previous behaviour untouched), the unique value combined
+  # with the scope values otherwise.
+  def unique_attr_cache_key(attr_value, row)
+    filters = unique_scope_filters(row)
+    return attr_value if filters.blank?
+
+    ([attr_value] + filters.map do |filter, operator, values|
+      "#{filter}#{operator}#{Array(values).join(',')}"
+    end).join(RedmineImporter::DeferredCallbacks::KEY_SEPARATOR)
+  end
+
+  # Human readable description of the current scope, used in the messages
+  def scope_description(row)
+    return '' if @unique_scope_fields.blank? || row.nil?
+
+    pairs = @unique_scope_fields.map do |field|
+      "#{field[:name]}: '#{row[field[:column]]}'"
+    end
+    " (#{pairs.join(', ')})"
+  end
+
+  def new_importer_query
+    # Use IssueQuery class Redmine >= 2.3.0
+    query_class = begin
+      Module.const_get('IssueQuery').is_a?(Class) ? IssueQuery : Query
+    rescue NameError
+      Query
+    end
+
+    query_class.new(name: '_importer', project: @project)
+  end
+
   def handle_issue_update(issue, row, author, status, update_other_project, journal_field, unique_attr, unique_field, ignore_non_exist, update_issue)
     if update_issue
       begin
@@ -418,13 +556,13 @@ class ImporterController < ApplicationController
         else
           log_failure(row,
                       l(:warning_no_match_for_update, issue_num: @failed_count + 1,
-                                                      value: row[unique_field]))
+                                                      value: "#{row[unique_field]}#{scope_description(row)}"))
           raise RowFailed
         end
       rescue MultipleIssuesForUniqueValue
         log_failure(row,
                     l(:warning_multiple_matches_for_update, issue_num: @failed_count + 1,
-                                                            value: row[unique_field]))
+                                                            value: "#{row[unique_field]}#{scope_description(row)}"))
         raise RowFailed
       end
     end
@@ -507,11 +645,13 @@ class ImporterController < ApplicationController
     # the # column is used only for CSV-internal references.
     # Use cache-based lookup to support deferred reference resolution.
     if unique_attr == 'standard_field-id' && !use_issue_id
-      if cached_parent = @issue_by_unique_attr[parent_value]
+      if cached_parent = @issue_by_unique_attr[unique_attr_cache_key(parent_value, row)]
         issue.parent_issue_id = cached_parent.id
       else
         # Parent not in cache yet - register callback for deferred assignment
-        @deferred_callbacks.register(parent_value, :set_parent, row[unique_field])
+        @deferred_callbacks.register(unique_attr_cache_key(parent_value, row),
+                                     :set_parent,
+                                     unique_attr_cache_key(row[unique_field], row))
       end
       return
     end
@@ -521,7 +661,9 @@ class ImporterController < ApplicationController
   rescue NoIssueForUniqueValue
     # Register callback for deferred parent assignment
     # Parent issue may appear later in CSV
-    @deferred_callbacks.register(parent_value, :set_parent, row[unique_field])
+    @deferred_callbacks.register(unique_attr_cache_key(parent_value, row),
+                                 :set_parent,
+                                 unique_attr_cache_key(row[unique_field], row))
   rescue MultipleIssuesForUniqueValue
     @failed_count += 1
     @failed_issues[@failed_count] = row
@@ -537,8 +679,11 @@ class ImporterController < ApplicationController
     @failed_issues = {}
     @messages = []
     @affect_projects_issues = {}
+    # Custom fields narrowing the scope of the unique values matching
+    @unique_scope_fields = []
     # This is a cache of previously inserted issues indexed by the value
-    # the user provided in the unique column
+    # the user provided in the unique column (combined with the values of
+    # the scope custom fields when such a scope is used)
     @issue_by_unique_attr = {}
     # Cache of user id by login
     @user_by_login = {}
@@ -762,8 +907,9 @@ class ImporterController < ApplicationController
   # Returns the issue object associated with the given value of the given attribute.
   # Raises NoIssueForUniqueValue if not found or MultipleIssuesForUniqueValue
   def issue_for_unique_attr(unique_attr, attr_value, row_data)
-    if @issue_by_unique_attr.key?(attr_value)
-      return @issue_by_unique_attr[attr_value]
+    cache_key = unique_attr_cache_key(attr_value, row_data)
+    if @issue_by_unique_attr.key?(cache_key)
+      return @issue_by_unique_attr[cache_key]
     end
 
     if use_issue_id && unique_attr == 'standard_field-id'
@@ -773,22 +919,23 @@ class ImporterController < ApplicationController
       end
       issues = [Issue.find_by_id(attr_value)].compact
     else
-      # Use IssueQuery class Redmine >= 2.3.0
-      begin
-        if Module.const_get('IssueQuery') && IssueQuery.is_a?(Class)
-          query_class = IssueQuery
-        end
-      rescue NameError
-        query_class = Query
-      end
-
-      query = query_class.new(name: '_importer', project: @project)
+      query = new_importer_query
       query.add_filter('status_id', '*', [1])
       query.add_filter(unique_attr, '=', [attr_value])
 
       unless query.filters.key?(unique_attr)
         raise UnusableUniqueField,
           "Field '#{unique_attr}' is not available as a query filter"
+      end
+
+      # narrow the matching scope down with the selected custom fields
+      unique_scope_filters(row_data).each do |filter, operator, values|
+        query.add_filter(filter, operator, values)
+
+        unless query.filters.key?(filter)
+          raise UnusableUniqueField,
+            "Field '#{filter}' is not available as a query filter"
+        end
       end
 
       issues = Issue.joins([:project])
@@ -801,9 +948,10 @@ class ImporterController < ApplicationController
     if issues.size > 1
       # counting and message are on a caller side
       raise MultipleIssuesForUniqueValue, "Unique field #{unique_attr} with" \
-        " value '#{attr_value}' has duplicate record"
+        " value '#{attr_value}'#{scope_description(row_data)} has duplicate record"
     elsif issues.empty? || issues[0].nil?
-      raise NoIssueForUniqueValue, "No issue with #{unique_attr} of '#{attr_value}' found"
+      raise NoIssueForUniqueValue,
+        "No issue with #{unique_attr} of '#{attr_value}'#{scope_description(row_data)} found"
     else
       issues.first
     end
