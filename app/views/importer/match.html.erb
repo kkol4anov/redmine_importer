@@ -48,6 +48,22 @@
         options_for_select(@headers.map{|header| force_utf8(header)}) %>
     </label>
     <br/>
+
+    <% if @scope_attrs.present? %>
+      <div id="unique_scope_fields_wrapper">
+        <label for="unique_scope_fields"><%= l(:label_unique_scope_fields) %></label>
+        <span class="unique-scope-picker">
+          <%= select_tag "unique_scope_fields",
+            raw("<option value=\"\">#{l(:option_ignore)}</option>") +
+              options_for_select(@scope_attrs, :disabled => @disabled_scope_attrs),
+            :id => 'unique_scope_fields',
+            :name => 'unique_scope_fields[]' %>
+          <span class="toggle-multiselect icon-only"><%= sprite_icon('') if respond_to?(:sprite_icon) %></span>
+        </span>
+        <em class="info"><%= l(:label_unique_scope_fields_info) %></em>
+      </div>
+      <br/>
+    <% end %>
     <label>
       <%= check_box_tag "send_emails", true, false %>
       <%= l(:label_importer_send_emails) %>
@@ -112,6 +128,37 @@
 
 <script type="text/javascript">
   $(document).ready(function() {
+    // The scope makes no sense when the issues are matched by their id:
+    // an id is unique by itself.
+    function uniqueColumnMapping() {
+      var column = $('#unique_field').val();
+      if (!column) { return ''; }
+
+      var mapping = $('select[name^="fields_map"]').filter(function() {
+        return this.name === 'fields_map[' + column + ']';
+      });
+      return mapping.val() || '';
+    }
+
+    // Collapsed: a plain drop-down for a single field.
+    // Expanded (the "+" icon): a list allowing several fields at once.
+    // Both the icon and the switching are handled by the core application.js
+    // (toggleMultiSelect / toggleMultiSelectIconInit), exactly as in the filters.
+    var scopeSelect = $('#unique_scope_fields');
+
+    function toggleUniqueScopeFields() {
+      var wrapper = $('#unique_scope_fields_wrapper');
+      if (!wrapper.length) { return; }
+
+      // The scope makes no sense when the issues are matched by their id.
+      var matchedById = uniqueColumnMapping() === 'standard_field-id';
+      wrapper.toggle(!matchedById);
+      scopeSelect.prop('disabled', matchedById);
+    }
+
+    $('#unique_field, select[name^="fields_map"]').on('change', toggleUniqueScopeFields);
+    toggleUniqueScopeFields();
+
     $('#map_form').on('submit', function() {
       $('#import-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});
     });

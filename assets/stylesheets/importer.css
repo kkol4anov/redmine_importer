@@ -9,3 +9,10 @@ text-align: right;
 width: 100px;
 display: inline-block;
 }
+
+/* Custom fields narrowing the scope of the unique values matching */
+#unique_scope_fields_wrapper { margin: 4px 0; }
+
+#unique_scope_fields_wrapper .unique-scope-picker { white-space: nowrap; }
+
+#unique_scope_fields_wrapper select[multiple] { vertical-align: middle; }

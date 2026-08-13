@@ -709,7 +709,153 @@ class ImporterControllerTest < ActionController::TestCase
     end
   end
 
+  test 'should narrow unique value matching down with custom field scope' do
+    region = create_scope_field!('Region', %w[North South])
+    north = create_issue_with_scope!('same subject', region, 'North')
+    south = create_issue_with_scope!('same subject', region, 'South')
+
+    post :result, params: scope_params('same subject,South,updated by importer')
+    assert_response :success
+
+    assert_equal 'updated by importer', south.reload.description
+    assert_nil north.reload.description
+  end
+
+  test 'should narrow unique value matching down with several custom field scopes' do
+    region = create_scope_field!('Region', %w[North South])
+    stage = create_scope_field!('Stage', %w[Design Build])
+
+    target = create_issue_with_scope!('same subject', region, 'South')
+    target.custom_field_values = { stage.id => 'Build' }
+    target.save!
+
+    other = create_issue_with_scope!('same subject', region, 'South')
+    other.custom_field_values = { stage.id => 'Design' }
+    other.save!
+
+    @iip.update!(csv_data: "Subject,Region,Stage,Description\nsame subject,South,Build,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_fields: ['custom_field-Region', 'custom_field-Stage'],
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Region' => 'custom_field-Region',
+        'Stage' => 'custom_field-Stage',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    assert_equal 'updated by importer', target.reload.description
+    assert_nil other.reload.description
+  end
+
+  test 'should report multiple matches without custom field scope' do
+    region = create_scope_field!('Region', %w[North South])
+    create_issue_with_scope!('same subject', region, 'North')
+    create_issue_with_scope!('same subject', region, 'South')
+
+    post :result, params: scope_params('same subject,South,updated by importer',
+                                       unique_scope_fields: [])
+    assert_response :success
+    assert response.body.include?('multiple matches'),
+           'Expected a multiple matches warning when no scope is used'
+  end
+
+  test 'should reject a scope custom field that is not usable as a filter' do
+    region = create_scope_field!('Region', %w[North South])
+    region.update!(is_filter: false)
+    create_issue_with_scope!('same subject', region, 'South')
+
+    post :result, params: scope_params('same subject,South,updated by importer')
+    assert flash[:error].present?, 'Expected an error for a non-filterable scope field'
+  end
+
+  test 'should reject a scope custom field that is not mapped to a column' do
+    create_scope_field!('Region', %w[North South])
+
+    @iip.update!(csv_data: "Subject,Description\nsame subject,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_fields: ['custom_field-Region'],
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert flash[:error].present?, 'Expected an error for an unmapped scope field'
+  end
+
+  test 'should ignore the scope when issues are matched by id' do
+    region = create_scope_field!('Region', %w[North South])
+    issue = create_issue_with_scope!('scoped by id', region, 'North')
+
+    @iip.update!(csv_data: "#,Subject,Region,Description\n#{issue.id},scoped by id,South,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: '#',
+      unique_scope_fields: ['custom_field-Region'],
+      update_issue: 'true',
+      use_issue_id: '1',
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Region' => 'custom_field-Region',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    # the scope must not prevent the issue from being found by its id,
+    # even though the value of the scope field differs
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
   protected
+
+  def create_scope_field!(name, possible_values)
+    field = IssueCustomField.new name: name,
+                                 field_format: 'list',
+                                 possible_values: possible_values,
+                                 is_filter: true,
+                                 multiple: false
+    field.projects << @project
+    field.save!
+    @tracker.custom_fields << field
+    @tracker.save!
+    field
+  end
+
+  def create_issue_with_scope!(subject, field, value)
+    issue = create_issue!(@project, @user, { subject: subject, tracker: @tracker })
+    issue.custom_field_values = { field.id => value }
+    issue.save!
+    issue
+  end
+
+  def scope_params(csv_row, opts = {})
+    @iip.update!(csv_data: "Subject,Region,Description\n#{csv_row}\n")
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_fields: ['custom_field-Region'],
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Region' => 'custom_field-Region',
+        'Description' => 'standard_field-description'
+      }
+    }.merge(opts)
+  end
 
   def build_params(opts = {})
     @iip.reload

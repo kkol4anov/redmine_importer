@@ -21,6 +21,8 @@ en:
   label_update_issue: "Update existing issues"
   label_journal_field: "Select column to use as note:"
   label_unique_field: "Select unique-valued column (required for updating existing issues or importing relations):"
+  label_unique_scope_fields: "Narrow the matching of the unique values down with the custom fields:"
+  label_unique_scope_fields_info: "The unique values are matched within the project only. Select one or several custom fields to match the values within the given values of these fields as well. The fields have to be mapped to the columns of the CSV file and have the \"Used as a filter\" option enabled. Not used when the unique column is mapped to the issue id."
   label_update_other_project: "Allow updating issues from other projects"
   label_ignore_non_exist: "Ignore non-existant issues"
   label_rule_name: "Input rule name"
@@ -56,6 +58,8 @@ en:
   error_csv_missing_headers: "Column header missing: %{columns} / %{total}"
   error_encoding_mismatch: "The file encoding does not match the selected character encoding. Please select the correct character encoding and upload again."
   error_unique_field_not_usable: "Column '%{field}' cannot be used as unique field: no such filter is available."
+  error_unique_scope_field_not_usable: "Custom field '%{field}' cannot be used to narrow the matching down: no such filter is available (the \"Used as a filter\" option is probably disabled)."
+  error_unique_scope_field_not_mapped: "Custom field '%{field}' cannot be used to narrow the matching down: it is not mapped to any column of the CSV file."
 
   warning_record_not_found: "Warning: When adding issue %{issue_num} below, the %{class_name} %{key} was not found"
   warning_invalid_value: "Warning: When adding issue %{issue_num} below, %{value} is not a valid value."
