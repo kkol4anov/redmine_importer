@@ -818,6 +818,51 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal 'updated by importer', issue.reload.description
   end
 
+  test 'should resolve CSV-internal id references through the cache only' do
+    # An issue whose database id equals the internal reference used in the CSV.
+    # With use_issue_id off the "#" column is a CSV-internal reference, so this
+    # issue must not be picked up as the parent.
+    decoy = create_issue!(@project, @user,
+                          { id: 2, subject: 'Decoy Issue', tracker: @tracker })
+
+    @iip.update!(csv_data: "#,Subject,Tracker,Status,Priority,Parent\n1,Child Issue,Defect,New,Critical,2\n2,Parent Issue,Defect,New,Critical,\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      unique_field: '#',
+      project_id: @project.id,
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Status' => 'standard_field-status',
+        'Priority' => 'standard_field-priority',
+        'Parent' => 'standard_field-parent_issue'
+      }
+    }
+    assert_response :success
+
+    child = Issue.find_by!(subject: 'Child Issue')
+    parent = Issue.find_by!(subject: 'Parent Issue')
+    assert_equal parent.id, child.parent_id
+    assert_not_equal decoy.id, child.parent_id
+  end
+
+  test 'should reject a unique column mapped to a field without a query filter' do
+    @iip.update!(csv_data: "Start date,Subject\n2015-01-30,barfooz\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Start date',
+      update_issue: 'true',
+      fields_map: {
+        'Start date' => 'standard_field-start_date',
+        'Subject' => 'standard_field-subject'
+      }
+    }
+    assert flash[:error].present?,
+           'Expected an error for a unique column without a query filter'
+  end
+
   protected
 
   def create_scope_field!(name, possible_values)
