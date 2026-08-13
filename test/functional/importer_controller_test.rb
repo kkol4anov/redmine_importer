@@ -863,7 +863,120 @@ class ImporterControllerTest < ActionController::TestCase
            'Expected an error for a unique column without a query filter'
   end
 
+  test 'should match the unique value within the tracker of the column' do
+    other_tracker = create_tracker!('Feature')
+    same = create_issue!(@project, @user, { subject: 'same subject', tracker: @tracker })
+    other = create_issue!(@project, @user, { subject: 'same subject', tracker: other_tracker })
+
+    post :result, params: tracker_scope_params("same subject,#{@tracker.name},updated by importer")
+    assert_response :success
+
+    assert_equal 'updated by importer', same.reload.description
+    assert_nil other.reload.description
+  end
+
+  test 'should fall back to the default tracker when the tracker column is not mapped' do
+    other_tracker = create_tracker!('Feature')
+    same = create_issue!(@project, @user, { subject: 'same subject', tracker: @tracker })
+    other = create_issue!(@project, @user, { subject: 'same subject', tracker: other_tracker })
+
+    @iip.update!(csv_data: "Subject,Description\nsame subject,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_tracker: '1',
+      default_tracker: @tracker.id.to_s,
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    assert_equal 'updated by importer', same.reload.description
+    assert_nil other.reload.description
+  end
+
+  test 'should report multiple matches when the tracker restriction is off' do
+    other_tracker = create_tracker!('Feature')
+    create_issue!(@project, @user, { subject: 'same subject', tracker: @tracker })
+    create_issue!(@project, @user, { subject: 'same subject', tracker: other_tracker })
+
+    post :result, params: tracker_scope_params("same subject,#{@tracker.name},updated by importer",
+                                               unique_scope_tracker: nil)
+    assert_response :success
+    assert response.body.include?('multiple matches'),
+           'Expected a multiple matches warning without the tracker restriction'
+  end
+
+  test 'should allow changing the tracker of an issue when the restriction is off' do
+    other_tracker = create_tracker!('Feature')
+    issue = create_issue!(@project, @user, { subject: 'moved subject', tracker: @tracker })
+
+    post :result, params: tracker_scope_params("moved subject,#{other_tracker.name},updated by importer",
+                                               unique_scope_tracker: nil)
+    assert_response :success
+
+    issue.reload
+    assert_equal other_tracker.id, issue.tracker_id
+    assert_equal 'updated by importer', issue.description
+  end
+
+  test 'should ignore the tracker restriction when issues are matched by id' do
+    other_tracker = create_tracker!('Feature')
+    issue = create_issue!(@project, @user, { subject: 'by id', tracker: @tracker })
+
+    @iip.update!(csv_data: "#,Subject,Tracker,Description\n#{issue.id},by id,#{other_tracker.name},updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: '#',
+      unique_scope_tracker: '1',
+      update_issue: 'true',
+      use_issue_id: '1',
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    # the tracker of the row differs from the current one, the issue must
+    # still be found by its id
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
   protected
+  def create_tracker!(name)
+    tracker = Tracker.new(name: name)
+    tracker.default_status = IssueStatus.find_or_create_by!(name: 'New')
+    tracker.save!
+    @project.trackers << tracker
+    @project.save!
+    tracker
+  end
+
+  def tracker_scope_params(csv_row, opts = {})
+    @iip.update!(csv_data: "Subject,Tracker,Description\n#{csv_row}\n")
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_tracker: '1',
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Description' => 'standard_field-description'
+      }
+    }.merge(opts).compact
+  end
+
 
   def create_scope_field!(name, possible_values)
     field = IssueCustomField.new name: name,
