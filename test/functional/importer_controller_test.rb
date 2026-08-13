@@ -950,7 +950,177 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal 'updated by importer', issue.reload.description
   end
 
+  test 'should match issues by the identifier extracted from the subject' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text | ABC-123', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text | ABC-123,updated by importer')
+    assert_response :success
+
+    issue.reload
+    assert_equal 'Renamed text | ABC-123', issue.subject
+    assert_equal 'updated by importer', issue.description
+  end
+
+  test 'should not match issues by the text part when the identifier is extracted' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Same text | ABC-123', tracker: @tracker })
+
+    post :result, params: extraction_params('Same text | ZZZ-999,updated by importer')
+    assert_response :success
+
+    assert_nil issue.reload.description
+  end
+
+  test 'should extract the identifier from the first part of the subject' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'ABC-123 | Old text', tracker: @tracker })
+
+    post :result, params: extraction_params('ABC-123 | Renamed text,updated by importer',
+                                            unique_value_part: 'first')
+    assert_response :success
+
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should support a custom separator' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text :: ABC-123', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text :: ABC-123,updated by importer',
+                                            unique_value_separator: '::')
+    assert_response :success
+
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should skip rows without the separator' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'No separator here', tracker: @tracker })
+
+    post :result, params: extraction_params('No separator here,updated by importer')
+    assert_response :success
+    assert_nil issue.reload.description
+  end
+
+  test 'should fall back to the whole value when the separator is not found' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'No separator here', tracker: @tracker })
+
+    post :result, params: extraction_params('No separator here,updated by importer',
+                                            unique_value_keep_whole: '1')
+    assert_response :success
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should narrow the extracted identifier matching down with a custom field scope' do
+    region = create_scope_field!('Region', %w[North South])
+    north = create_issue_with_scope!('North text | ABC-123', region, 'North')
+    south = create_issue_with_scope!('South text | ABC-123', region, 'South')
+
+    @iip.update!(csv_data: "Subject,Region,Description\nRenamed | ABC-123,South,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_fields: ['custom_field-Region'],
+      update_issue: 'true',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Region' => 'custom_field-Region',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    assert_equal 'updated by importer', south.reload.description
+    assert_nil north.reload.description
+  end
+
+  test 'should reject the extraction from a non-text unique column' do
+    @iip.update!(csv_data: "Tracker,Description\nDefect | ABC-123,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Tracker',
+      update_issue: 'true',
+      extract_unique_value: '1',
+      fields_map: {
+        'Tracker' => 'standard_field-tracker',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert flash[:error].present?, 'Expected an error for a non-text unique column'
+  end
+
+  test 'should match the extracted identifier within the tracker of the row' do
+    other_tracker = create_tracker!('Feature')
+    same = create_issue!(@project, @user,
+                         { subject: 'One text | ABC-123', tracker: @tracker })
+    other = create_issue!(@project, @user,
+                          { subject: 'Other text | ABC-123', tracker: other_tracker })
+
+    @iip.update!(csv_data: "Subject,Tracker,Description\nRenamed | ABC-123,#{@tracker.name},updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_tracker: '1',
+      update_issue: 'true',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    assert_equal 'updated by importer', same.reload.description
+    assert_nil other.reload.description
+  end
+
+  test 'should list the conflicting issues when the identifier is not unique' do
+    create_issue!(@project, @user, { subject: 'One text | ABC-123', tracker: @tracker })
+    create_issue!(@project, @user, { subject: 'Other text | ABC-123', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed | ABC-123,updated by importer')
+    assert_response :success
+
+    assert response.body.include?('multiple matches'),
+           'Expected a multiple matches warning'
+    assert response.body.match?(/#\d+, #\d+/),
+           'Expected the ids of the conflicting issues in the warning'
+  end
+
   protected
+
+  def extraction_params(csv_row, opts = {})
+    @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)
+    @iip.csv_data = "Subject,Description\n#{csv_row}\n"
+    @iip.created = DateTime.now
+    @iip.encoding = 'UTF-8'
+    @iip.col_sep = ','
+    @iip.quote_char = '"'
+    @iip.save!
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }.merge(opts)
+  end
+
   def create_tracker!(name)
     tracker = Tracker.new(name: name)
     tracker.default_status = IssueStatus.find_or_create_by!(name: 'New')
