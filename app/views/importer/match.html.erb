@@ -58,8 +58,7 @@
               options_for_select(@scope_attrs, :disabled => @disabled_scope_attrs),
             :id => 'unique_scope_fields',
             :name => 'unique_scope_fields[]' %>
-          <a href="#" id="toggle_unique_scope_fields" class="unique-scope-toggle"
-             title="<%= l(:description_toggle_multiselect) %>">+</a>
+          <span class="toggle-multiselect icon-only"><%= sprite_icon('') if respond_to?(:sprite_icon) %></span>
         </span>
         <em class="info"><%= l(:label_unique_scope_fields_info) %></em>
       </div>
@@ -141,21 +140,11 @@
       return mapping.val() || '';
     }
 
-    var scopeSelect = $('#unique_scope_fields');
-    var scopeToggle = $('#toggle_unique_scope_fields');
-
     // Collapsed: a plain drop-down for a single field.
-    // Expanded (the "+" button): a list allowing several fields at once.
-    // The switching itself is done by toggleMultiSelect() from the core
-    // application.js, the very same helper the issue filters use.
-    scopeToggle.on('click', function(e) {
-      e.preventDefault();
-      toggleMultiSelect(scopeSelect);
-
-      var expanded = !!scopeSelect.attr('multiple');
-      scopeToggle.text(expanded ? '\u2212' : '+')
-                 .toggleClass('expanded', expanded);
-    });
+    // Expanded (the "+" icon): a list allowing several fields at once.
+    // Both the icon and the switching are handled by the core application.js
+    // (toggleMultiSelect / toggleMultiSelectIconInit), exactly as in the filters.
+    var scopeSelect = $('#unique_scope_fields');
 
     function toggleUniqueScopeFields() {
       var wrapper = $('#unique_scope_fields_wrapper');
