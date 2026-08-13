@@ -139,6 +139,11 @@ class ImporterController < ApplicationController
     fields_map = {}
     params[:fields_map].each { |k, v| fields_map[k.unpack('U*').pack('U*')] = v }
     unique_attr = fields_map[unique_field]
+    # translate_unique_attr below replaces 'standard_field-id' with the name of
+    # the query filter ('issue_id'), so the raw mapping has to be remembered
+    # before the translation to be able to tell later that the issues are
+    # matched by their id
+    @unique_attr_is_issue_id = unique_attr == 'standard_field-id'
 
     default_tracker = params[:default_tracker]
     journal_field = params[:journal_field]
@@ -173,7 +178,7 @@ class ImporterController < ApplicationController
     if unique_attr.present?
       unique_attr = translate_unique_attr(unique_field, unique_attr)
       if unique_attr.nil? ||
-        (unique_attr.start_with?('standatd_field-') && unique_attr != 'standard_field-id')
+        unique_attr.start_with?('standard_field-')
         flash[:error] = l(:error_unique_field_not_usable, field: fields_map[unique_field])
         return
       end
@@ -323,9 +328,10 @@ class ImporterController < ApplicationController
 
           raw_value.split(',').map(&:strip).reject(&:blank?).each do |other_value|
             begin
-              # When unique_attr is 'standard_field-id' and use_issue_id is false,
-              # use cache-based lookup to support deferred reference resolution.
-              if unique_attr == 'standard_field-id' && !use_issue_id
+              # When the unique column is mapped to the id and use_issue_id is
+              # false, use cache-based lookup to support deferred reference
+              # resolution.
+              if csv_internal_ids?
                 other_issue = @issue_by_unique_attr[unique_attr_cache_key(other_value, row)]
                 unless other_issue
                   # Target not in cache yet - register callback for deferred creation
@@ -641,10 +647,10 @@ class ImporterController < ApplicationController
     parent_value = fetch('standard_field-parent_issue', row)
     return unless parent_value.present?
 
-    # When unique_attr is 'standard_field-id' and use_issue_id is false,
+    # When the unique column is mapped to the id and use_issue_id is false,
     # the # column is used only for CSV-internal references.
     # Use cache-based lookup to support deferred reference resolution.
-    if unique_attr == 'standard_field-id' && !use_issue_id
+    if csv_internal_ids?
       if cached_parent = @issue_by_unique_attr[unique_attr_cache_key(parent_value, row)]
         issue.parent_issue_id = cached_parent.id
       else
@@ -681,6 +687,8 @@ class ImporterController < ApplicationController
     @affect_projects_issues = {}
     # Custom fields narrowing the scope of the unique values matching
     @unique_scope_fields = []
+    # Whether the unique column is mapped to the issue id
+    @unique_attr_is_issue_id = false
     # This is a cache of previously inserted issues indexed by the value
     # the user provided in the unique column (combined with the values of
     # the scope custom fields when such a scope is used)
@@ -776,6 +784,14 @@ class ImporterController < ApplicationController
 
   def use_issue_id
     params[:use_issue_id].present?
+  end
+
+  # True when the values of the unique column are issue ids used only as
+  # references inside the CSV file (the issues themselves are created with
+  # new ids). Such references can only be resolved through the cache of the
+  # already imported issues, possibly deferred until the target row is read.
+  def csv_internal_ids?
+    @unique_attr_is_issue_id && !use_issue_id
   end
 
   def fetch(key, row)
@@ -912,7 +928,7 @@ class ImporterController < ApplicationController
       return @issue_by_unique_attr[cache_key]
     end
 
-    if use_issue_id && unique_attr == 'standard_field-id'
+    if use_issue_id && @unique_attr_is_issue_id
       unless attr_value.to_s.match?(/\A\d+\z/)
         raise NoIssueForUniqueValue,
           "Value '#{attr_value}' is not a valid issue id"
