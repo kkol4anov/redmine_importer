@@ -425,13 +425,18 @@ class ImporterController < ApplicationController
   # their id (id is globally unique, no scope is needed) or nothing selected.
   # Returns nil and sets flash[:error] when the selection is not usable.
   def build_unique_scope_fields(raw_unique_attr)
-    selected = Array(params[:unique_scope_fields]).reject(&:blank?).uniq
-    return [] if selected.empty?
+    # the id of an issue is unique by itself, no scope is needed (and the
+    # tracker of the row may well be the new tracker of an existing issue)
     return [] if raw_unique_attr.blank? || raw_unique_attr == 'standard_field-id'
+
+    fields = [tracker_scope_field].compact
+
+    selected = Array(params[:unique_scope_fields]).reject(&:blank?).uniq
+    return fields if selected.empty?
 
     query = new_importer_query
 
-    selected.filter_map do |field_key|
+    fields + selected.filter_map do |field_key|
       # only custom fields can be used as a scope
       unless field_key.to_s.start_with?('custom_field-')
         flash[:error] = l(:error_unique_scope_field_not_usable, field: field_key)
@@ -461,12 +466,37 @@ class ImporterController < ApplicationController
     end
   end
 
+  # The tracker is always part of the scope: an issue gets its tracker from the
+  # mapped column and falls back to the default tracker, so the same value is
+  # the natural boundary for matching the unique values.
+  #
+  # Returns nil when the tracker cannot be determined at all (no column and no
+  # default) or when the user turned the restriction off, which is needed for
+  # imports that change the tracker of existing issues.
+  def tracker_scope_field
+    return nil if params[:unique_scope_tracker].blank?
+
+    column = @attrs_map['standard_field-tracker']
+    default = params[:default_tracker].presence
+    return nil if column.blank? && default.nil?
+
+    { name: l_or_humanize('tracker', prefix: 'field_'),
+      filter: 'tracker_id', column: column, tracker: true, default: default }
+  end
+
   # Query filters ([filter_name, operator, values]) built from the values
-  # of the scope custom fields in the given row.
+  # of the scope fields in the given row.
   def unique_scope_filters(row)
     return [] if @unique_scope_fields.blank? || row.nil?
 
-    @unique_scope_fields.map do |field|
+    @unique_scope_fields.filter_map do |field|
+      if field[:tracker]
+        tracker_id = tracker_scope_id(row, field)
+        next if tracker_id.nil?
+
+        next [field[:filter], '=', [tracker_id.to_s]]
+      end
+
       raw_value = row[field[:column]].to_s.strip
 
       if raw_value.blank?
@@ -476,6 +506,16 @@ class ImporterController < ApplicationController
         [field[:filter], '=', [scope_filter_value(field[:custom_field], raw_value)]]
       end
     end
+  end
+
+  # Mirrors the way the tracker is assigned to the issue itself:
+  #   issue.tracker_id = tracker&.id || default_tracker
+  # so that the row is matched against the issues of exactly that tracker.
+  def tracker_scope_id(row, field)
+    name = field[:column].present? ? row[field[:column]].to_s.strip : ''
+    tracker = Tracker.find_by_name(name) if name.present?
+
+    tracker&.id || field[:default]
   end
 
   # Custom field values are stored (and filtered) by id for some formats,
@@ -513,9 +553,17 @@ class ImporterController < ApplicationController
   def scope_description(row)
     return '' if @unique_scope_fields.blank? || row.nil?
 
-    pairs = @unique_scope_fields.map do |field|
+    pairs = @unique_scope_fields.filter_map do |field|
+      if field[:tracker]
+        tracker_id = tracker_scope_id(row, field)
+        next if tracker_id.nil?
+
+        next "#{field[:name]}: '#{Tracker.find_by(id: tracker_id)&.name}'"
+      end
+
       "#{field[:name]}: '#{row[field[:column]]}'"
     end
+    return '' if pairs.empty?
     " (#{pairs.join(', ')})"
   end
 

@@ -49,6 +49,15 @@
     </label>
     <br/>
 
+    <div id="unique_scope_tracker_wrapper">
+      <label>
+        <%= check_box_tag "unique_scope_tracker", true, true %>
+        <%= l(:label_unique_scope_tracker) %>
+      </label>
+      <em class="info"><%= l(:label_unique_scope_tracker_info) %></em>
+    </div>
+    <br/>
+
     <% if @scope_attrs.present? %>
       <div id="unique_scope_fields_wrapper">
         <label for="unique_scope_fields"><%= l(:label_unique_scope_fields) %></label>
@@ -147,11 +156,16 @@
     var scopeSelect = $('#unique_scope_fields');
 
     function toggleUniqueScopeFields() {
+      // The scope makes no sense when the issues are matched by their id.
+      var matchedById = uniqueColumnMapping() === 'standard_field-id';
+
+      var trackerWrapper = $('#unique_scope_tracker_wrapper');
+      trackerWrapper.toggle(!matchedById);
+      $('#unique_scope_tracker').prop('disabled', matchedById);
+
       var wrapper = $('#unique_scope_fields_wrapper');
       if (!wrapper.length) { return; }
 
-      // The scope makes no sense when the issues are matched by their id.
-      var matchedById = uniqueColumnMapping() === 'standard_field-id';
       wrapper.toggle(!matchedById);
       scopeSelect.prop('disabled', matchedById);
     }

@@ -21,6 +21,8 @@ en:
   label_update_issue: "Update existing issues"
   label_journal_field: "Select column to use as note:"
   label_unique_field: "Select unique-valued column (required for updating existing issues or importing relations):"
+  label_unique_scope_tracker: "Match the unique values within the tracker of the row"
+  label_unique_scope_tracker_info: "The tracker of the row is taken from the mapped column and falls back to the default tracker above. Turn this off when the import has to change the tracker of the existing issues, otherwise they will not be found. Not used when the unique column is mapped to the issue id."
   label_unique_scope_fields: "Narrow the matching of the unique values down with the custom fields:"
   label_unique_scope_fields_info: "The unique values are matched within the project only. Select one or several custom fields to match the values within the given values of these fields as well. The fields have to be mapped to the columns of the CSV file and have the \"Used as a filter\" option enabled. Not used when the unique column is mapped to the issue id."
   label_update_other_project: "Allow updating issues from other projects"
