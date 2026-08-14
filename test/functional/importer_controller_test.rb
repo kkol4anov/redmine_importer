@@ -1096,6 +1096,72 @@ class ImporterControllerTest < ActionController::TestCase
            'Expected the ids of the conflicting issues in the warning'
   end
 
+  test 'should ignore a mark following the identifier' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text | ABC-123 [ДУБЛЬ]', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text | ABC-123,updated by importer')
+    assert_response :success
+
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should ignore a mark coming from the CSV as well' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text | ABC-123', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text | ABC-123 [ДУБЛЬ],updated by importer')
+    assert_response :success
+
+    issue.reload
+    assert_equal 'Renamed text | ABC-123 [ДУБЛЬ]', issue.subject
+    assert_equal 'updated by importer', issue.description
+  end
+
+  test 'should ignore several marks following the identifier' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text | ABC-123 [ДУБЛЬ] [АРХИВ]', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text | ABC-123 [АРХИВ],updated by importer')
+    assert_response :success
+
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should ignore a mark when the identifier is the first part' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'ABC-123 [ДУБЛЬ] | Old text', tracker: @tracker })
+
+    post :result, params: extraction_params('ABC-123 | Renamed text,updated by importer',
+                                            unique_value_part: 'first')
+    assert_response :success
+
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
+  test 'should keep brackets that are not separated from the identifier' do
+    with_space = create_issue!(@project, @user,
+                               { subject: 'One text | ABC-123 [1]', tracker: @tracker })
+    without_space = create_issue!(@project, @user,
+                                  { subject: 'Other text | ABC-123[1]', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed | ABC-123[1],updated by importer')
+    assert_response :success
+
+    assert_equal 'updated by importer', without_space.reload.description
+    assert_nil with_space.reload.description
+  end
+
+  test 'should skip a value consisting of a mark only' do
+    issue = create_issue!(@project, @user,
+                          { subject: 'Old text | [ДУБЛЬ]', tracker: @tracker })
+
+    post :result, params: extraction_params('Renamed text | [ДУБЛЬ],updated by importer')
+    assert_response :success
+
+    assert_nil issue.reload.description
+  end
+
   protected
 
   def extraction_params(csv_row, opts = {})

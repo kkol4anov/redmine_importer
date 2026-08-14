@@ -41,6 +41,12 @@ class ImporterController < ApplicationController
   TEXT_UNIQUE_FILTERS = %w[subject description].freeze
   # Custom field formats supporting the "contains" (~) filter operator
   TEXT_CUSTOM_FIELD_FORMATS = %w[string text link].freeze
+  # Special marks that may follow the identifier, separated from it by a space,
+  # e.g. "Set counter | ABC-123 [DUPLICATE]". They are cut off and do not take
+  # part in the matching.
+  UNIQUE_VALUE_MARKS = /(?:\s+\[[^\[\]]*\])+\z/
+  # A value consisting of a single mark carries no identifier at all
+  UNIQUE_VALUE_MARK_ONLY = /\A\[[^\[\]]*\]\z/
   # Max number of candidates loaded by a substring lookup before the exact
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
@@ -913,14 +919,25 @@ class ImporterController < ApplicationController
     separator = @unique_value_extraction[:separator]
 
     unless value.include?(separator)
-      return @unique_value_extraction[:keep_whole] ? value.strip.presence : nil
+      return @unique_value_extraction[:keep_whole] ? strip_unique_value_marks(value) : nil
     end
 
     # -1 keeps the trailing empty parts, so "Text | " yields no identifier
     parts = value.split(separator, -1).map(&:strip)
     code = @unique_value_extraction[:part] == 'first' ? parts.first : parts.last
 
-    code.presence
+    strip_unique_value_marks(code)
+  end
+
+  # Cuts the trailing marks off: "ABC-123 [DUPLICATE]" -> "ABC-123".
+  # A mark has to be separated by a space, so "ABC-123[1]" stays untouched -
+  # there the brackets are part of the identifier itself.
+  # Returns nil when nothing but a mark is left.
+  def strip_unique_value_marks(value)
+    stripped = value.to_s.strip
+    return nil if stripped.match?(UNIQUE_VALUE_MARK_ONLY)
+
+    stripped.sub(UNIQUE_VALUE_MARKS, '').strip.presence
   end
 
   # Only the text-like fields supporting the "contains" (~) filter operator

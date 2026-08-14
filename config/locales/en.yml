@@ -26,7 +26,7 @@ en:
   label_unique_scope_fields: "Narrow the matching of the unique values down with the custom fields:"
   label_unique_scope_fields_info: "The unique values are matched within the project only. Select one or several custom fields to match the values within the given values of these fields as well. The fields have to be mapped to the columns of the CSV file and have the \"Used as a filter\" option enabled. Not used when the unique column is mapped to the issue id."
   label_extract_unique_value: "Extract the identifier from the text of the unique column"
-  label_extract_unique_value_info: "The values are expected in the \"<text> | <code>\" format. Only the code is matched, so the issues keep matching after the text part has been edited. Available for the text fields only (Subject, Description, string/text/link custom fields)."
+  label_extract_unique_value_info: "The values are expected in the \"<text> | <code>\" format. Only the code is matched, so the issues keep matching after the text part has been edited. Marks in square brackets following the code and separated from it by a space (e.g. \"| ABC-123 [DUPLICATE]\") are ignored. Available for the text fields only (Subject, Description, string/text/link custom fields)."
   label_unique_value_separator: "Separator:"
   label_unique_value_part: "Identifier position:"
   label_unique_value_part_last: "after the separator (last part)"
