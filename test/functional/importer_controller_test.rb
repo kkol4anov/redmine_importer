@@ -1162,7 +1162,82 @@ class ImporterControllerTest < ActionController::TestCase
     assert_nil issue.reload.description
   end
 
+  test 'should accept a bare identifier in the parent column' do
+    parent = create_issue!(@project, @user,
+                           { subject: 'Parent text | 000.0000.000', tracker: @tracker })
+
+    post :result, params: extraction_reference_params(
+      "Child text | 000.0000.001,000.0000.000\n"
+    )
+    assert_response :success
+
+    child = Issue.find_by!(subject: 'Child text | 000.0000.001')
+    assert_equal parent.id, child.parent_id
+    assert_not response.body.include?('could be extracted')
+  end
+
+  test 'should accept a full pair in the parent column' do
+    parent = create_issue!(@project, @user,
+                           { subject: 'Parent text | 000.0000.000', tracker: @tracker })
+
+    post :result, params: extraction_reference_params(
+      "Child text | 000.0000.001,Any other text | 000.0000.000\n"
+    )
+    assert_response :success
+
+    child = Issue.find_by!(subject: 'Child text | 000.0000.001')
+    assert_equal parent.id, child.parent_id
+  end
+
+  test 'should accept a bare identifier with a mark in the parent column' do
+    parent = create_issue!(@project, @user,
+                           { subject: 'Parent text | 000.0000.000', tracker: @tracker })
+
+    post :result, params: extraction_reference_params(
+      "Child text | 000.0000.001,000.0000.000 [ДУБЛЬ]\n"
+    )
+    assert_response :success
+
+    child = Issue.find_by!(subject: 'Child text | 000.0000.001')
+    assert_equal parent.id, child.parent_id
+  end
+
+  test 'should resolve a bare identifier referring to a later row' do
+    post :result, params: extraction_reference_params(
+      "Child text | 000.0000.001,000.0000.000\nParent text | 000.0000.000,\n"
+    )
+    assert_response :success
+
+    child = Issue.find_by!(subject: 'Child text | 000.0000.001')
+    parent = Issue.find_by!(subject: 'Parent text | 000.0000.000')
+    assert_equal parent.id, child.parent_id
+  end
+
   protected
+  def extraction_reference_params(csv_rows, opts = {})
+    @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)
+    @iip.csv_data = "Subject,Parent\n#{csv_rows}"
+    @iip.created = DateTime.now
+    @iip.encoding = 'UTF-8'
+    @iip.col_sep = ','
+    @iip.quote_char = '"'
+    @iip.save!
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      default_tracker: @tracker.id.to_s,
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Parent' => 'standard_field-parent_issue'
+      }
+    }.merge(opts)
+  end
+
 
   def extraction_params(csv_row, opts = {})
     @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)

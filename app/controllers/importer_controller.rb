@@ -343,7 +343,8 @@ class ImporterController < ApplicationController
             @issue_by_unique_attr[row_key] = issue
             @deferred_callbacks.execute(row_key, issue)
           else
-            @messages << l(:warning_unique_value_not_extracted, value: row[unique_field])
+            @messages << l(:warning_unique_value_not_extracted,
+                           value: row[unique_field], column: unique_field)
           end
         end
 
@@ -372,16 +373,18 @@ class ImporterController < ApplicationController
               # false, use cache-based lookup to support deferred reference
               # resolution.
               if csv_internal_ids?
-                other_key = unique_attr_cache_key(other_value, row)
+                other_key = unique_attr_cache_key(other_value, row, reference: true)
                 other_issue = other_key && @issue_by_unique_attr[other_key]
                 unless other_issue
                   # Target not in cache yet - register callback for deferred creation
                   register_deferred_reference(other_value, :add_relation,
-                                              row, unique_field, rtype)
+                                              row, unique_field, rtype,
+                                              column: @attrs_map["issue_relation-#{rtype}"])
                   next
                 end
               else
-                other_issue = issue_for_unique_attr(unique_attr, other_value, row)
+                other_issue = issue_for_unique_attr(unique_attr, other_value, row,
+                                                    reference: true)
               end
 
               already_related = issue.relations.any? do |r|
@@ -400,7 +403,8 @@ class ImporterController < ApplicationController
               # Register callback for deferred relation creation
               # Target issue may appear later in CSV
               register_deferred_reference(other_value, :add_relation,
-                                          row, unique_field, rtype)
+                                          row, unique_field, rtype,
+                                          column: @attrs_map["issue_relation-#{rtype}"])
             rescue MultipleIssuesForUniqueValue
               @messages << "Warning: Multiple matches for relation target '#{other_value}'"
             end
@@ -579,8 +583,8 @@ class ImporterController < ApplicationController
   # with the scope values otherwise.
   # Returns nil when the extraction is enabled but no identifier can be
   # extracted from the given value.
-  def unique_attr_cache_key(attr_value, row)
-    key_value = extract_unique_value(attr_value)
+  def unique_attr_cache_key(attr_value, row, reference: false)
+    key_value = extract_unique_value(attr_value, reference: reference)
     return nil if key_value.nil?
 
     filters = unique_scope_filters(row)
@@ -742,22 +746,25 @@ class ImporterController < ApplicationController
     # the # column is used only for CSV-internal references.
     # Use cache-based lookup to support deferred reference resolution.
     if csv_internal_ids?
-      parent_key = unique_attr_cache_key(parent_value, row)
+      parent_key = unique_attr_cache_key(parent_value, row, reference: true)
       if parent_key && (cached_parent = @issue_by_unique_attr[parent_key])
         issue.parent_issue_id = cached_parent.id
       else
         # Parent not in cache yet - register callback for deferred assignment
-        register_deferred_reference(parent_value, :set_parent, row, unique_field)
+        register_deferred_reference(parent_value, :set_parent, row, unique_field,
+                                    column: @attrs_map['standard_field-parent_issue'])
       end
       return
     end
 
     # Standard lookup via issue_for_unique_attr
-    issue.parent_issue_id = issue_for_unique_attr(unique_attr, parent_value, row).id
+    issue.parent_issue_id = issue_for_unique_attr(unique_attr, parent_value, row,
+                                                  reference: true).id
   rescue NoIssueForUniqueValue
     # Register callback for deferred parent assignment
     # Parent issue may appear later in CSV
-    register_deferred_reference(parent_value, :set_parent, row, unique_field)
+    register_deferred_reference(parent_value, :set_parent, row, unique_field,
+                                column: @attrs_map['standard_field-parent_issue'])
   rescue MultipleIssuesForUniqueValue
     @failed_count += 1
     @failed_issues[@failed_count] = row
@@ -912,14 +919,20 @@ class ImporterController < ApplicationController
   # Returns the identifier extracted from the raw value.
   # Returns the raw value untouched when the extraction is disabled, and nil
   # when no identifier can be extracted (unless keep_whole is on).
-  def extract_unique_value(raw_value)
+  # reference: the value comes from a column referring to another issue
+  # (parent issue, related issues). Such a column holds the identifier itself,
+  # not the "<text> <separator> <code>" pair, so a value without the separator
+  # is taken as the identifier as is. Both spellings are accepted, because the
+  # references are often copied from the same column as the unique values.
+  def extract_unique_value(raw_value, reference: false)
     return raw_value if raw_value.nil? || !extract_unique_value?
 
     value = raw_value.to_s
     separator = @unique_value_extraction[:separator]
 
     unless value.include?(separator)
-      return @unique_value_extraction[:keep_whole] ? strip_unique_value_marks(value) : nil
+      keep_whole = reference || @unique_value_extraction[:keep_whole]
+      return keep_whole ? strip_unique_value_marks(value) : nil
     end
 
     # -1 keeps the trailing empty parts, so "Text | " yields no identifier
@@ -985,13 +998,20 @@ class ImporterController < ApplicationController
   # Registers a deferred callback for a reference that cannot be resolved yet.
   # Skips it with a warning when no identifier can be extracted from either
   # the referenced value or the unique value of the current row.
-  def register_deferred_reference(target_value, callback_name, row, unique_field, *args)
-    target_key = unique_attr_cache_key(target_value, row)
+  def register_deferred_reference(target_value, callback_name, row, unique_field, *args,
+                                  column: nil)
+    target_key = unique_attr_cache_key(target_value, row, reference: true)
     source_key = unique_attr_cache_key(row[unique_field], row)
 
-    if target_key.nil? || source_key.nil?
+    if target_key.nil?
+      @messages << l(:warning_reference_value_not_extracted,
+                     value: target_value, column: column)
+      return
+    end
+
+    if source_key.nil?
       @messages << l(:warning_unique_value_not_extracted,
-                     value: target_key.nil? ? target_value : row[unique_field])
+                     value: row[unique_field], column: unique_field)
       return
     end
 
@@ -1126,15 +1146,15 @@ class ImporterController < ApplicationController
 
   # Returns the issue object associated with the given value of the given attribute.
   # Raises NoIssueForUniqueValue if not found or MultipleIssuesForUniqueValue
-  def issue_for_unique_attr(unique_attr, attr_value, row_data)
-    lookup_value = extract_unique_value(attr_value)
+  def issue_for_unique_attr(unique_attr, attr_value, row_data, reference: false)
+    lookup_value = extract_unique_value(attr_value, reference: reference)
     if lookup_value.nil?
       raise NoIssueForUniqueValue,
         "No identifier could be extracted from '#{attr_value}' with the " \
         "separator '#{@unique_value_extraction[:separator]}'"
     end
 
-    cache_key = unique_attr_cache_key(attr_value, row_data)
+    cache_key = unique_attr_cache_key(attr_value, row_data, reference: reference)
     if @issue_by_unique_attr.key?(cache_key)
       return @issue_by_unique_attr[cache_key]
     end

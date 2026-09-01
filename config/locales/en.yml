@@ -26,7 +26,7 @@ en:
   label_unique_scope_fields: "Narrow the matching of the unique values down with the custom fields:"
   label_unique_scope_fields_info: "The unique values are matched within the project only. Select one or several custom fields to match the values within the given values of these fields as well. The fields have to be mapped to the columns of the CSV file and have the \"Used as a filter\" option enabled. Not used when the unique column is mapped to the issue id."
   label_extract_unique_value: "Extract the identifier from the text of the unique column"
-  label_extract_unique_value_info: "The values are expected in the \"<text> | <code>\" format. Only the code is matched, so the issues keep matching after the text part has been edited. Marks in square brackets following the code and separated from it by a space (e.g. \"| ABC-123 [DUPLICATE]\") are ignored. Available for the text fields only (Subject, Description, string/text/link custom fields)."
+  label_extract_unique_value_info: "The values are expected in the \"<text> | <code>\" format. Only the code is matched, so the issues keep matching after the text part has been edited. Marks in square brackets following the code and separated from it by a space (e.g. \"| ABC-123 [DUPLICATE]\") are ignored. The columns referring to other issues (parent issue, related issues) may hold either the same pair or the bare code. Available for the text fields only (Subject, Description, string/text/link custom fields)."
   label_unique_value_separator: "Separator:"
   label_unique_value_part: "Identifier position:"
   label_unique_value_part_last: "after the separator (last part)"
@@ -72,7 +72,8 @@ en:
   error_extraction_without_unique_field: "The unique-valued column must be mapped to a field to extract the identifier from its text."
   error_unique_field_not_text: "Column '%{field}' is mapped to a non-text field, the identifier cannot be extracted from it."
 
-  warning_unique_value_not_extracted: "Warning: no identifier could be extracted from the value '%{value}', the reference was skipped"
+  warning_unique_value_not_extracted: "Warning: no identifier could be extracted from the value '%{value}' of the column '%{column}', the issue cannot be referred to from within the file"
+  warning_reference_value_not_extracted: "Warning: no identifier could be extracted from the reference '%{value}' of the column '%{column}', the reference was skipped"
   warning_extraction_too_many_candidates: "Warning: more than %{limit} issues contain the value '%{value}', the matching may be incomplete"
   warning_record_not_found: "Warning: When adding issue %{issue_num} below, the %{class_name} %{key} was not found"
   warning_invalid_value: "Warning: When adding issue %{issue_num} below, %{value} is not a valid value."
