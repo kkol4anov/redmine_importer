@@ -1213,6 +1213,75 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal parent.id, child.parent_id
   end
 
+  test 'should reject a mapping of several columns to the same field' do
+    @iip.update!(csv_data: "Subject,Parent,Old parent\nfoo,,0\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Parent' => 'standard_field-parent_issue',
+        'Old parent' => 'standard_field-parent_issue'
+      }
+    }
+    assert flash[:error].present?, 'Expected an error for a duplicate mapping'
+    assert flash[:error].include?('Parent'), 'Expected the columns in the message'
+  end
+
+  test 'should allow several unmapped columns' do
+    @iip.update!(csv_data: "Subject,Note,Comment\nfoo,a,b\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Note' => '',
+        'Comment' => ''
+      }
+    }
+    assert_response :success
+    assert_nil flash[:error]
+  end
+
+  test 'should name the column in the unresolved reference warning' do
+    post :result, params: extraction_reference_params(
+      "Child text | 000.0000.001,000.0000.999\n"
+    )
+    assert_response :success
+
+    assert response.body.include?('never resolved'), 'Expected an unresolved warning'
+    assert response.body.include?("of the column 'Parent'"),
+           'Expected the column name in the unresolved warning'
+  end
+
+  test 'should name the scope in the unresolved reference warning' do
+    @iip.update!(csv_data: "Subject,Tracker,Parent\n" \
+                           "Child text | 000.0000.001,#{@tracker.name},000.0000.999\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      unique_scope_tracker: '1',
+      update_issue: 'true',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Parent' => 'standard_field-parent_issue'
+      }
+    }
+    assert_response :success
+
+    assert response.body.include?('never resolved'), 'Expected an unresolved warning'
+    assert response.body.include?(@tracker.name),
+           'Expected the scope in the unresolved warning'
+  end
+
   protected
   def extraction_reference_params(csv_rows, opts = {})
     @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)

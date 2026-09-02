@@ -68,6 +68,7 @@ en:
   error_encoding_mismatch: "The file encoding does not match the selected character encoding. Please select the correct character encoding and upload again."
   error_unique_field_not_usable: "Column '%{field}' cannot be used as unique field: no such filter is available."
   error_unique_scope_field_not_usable: "Custom field '%{field}' cannot be used to narrow the matching down: no such filter is available (the \"Used as a filter\" option is probably disabled)."
+  error_duplicate_field_mapping: "Several columns are mapped to the field '%{field}': %{columns}. Only one of them would be imported, leave a single mapping."
   error_unique_scope_field_not_mapped: "Custom field '%{field}' cannot be used to narrow the matching down: it is not mapped to any column of the CSV file."
   error_extraction_without_unique_field: "The unique-valued column must be mapped to a field to extract the identifier from its text."
   error_unique_field_not_text: "Column '%{field}' is mapped to a non-text field, the identifier cannot be extracted from it."

@@ -173,6 +173,15 @@ class ImporterController < ApplicationController
     # attrs_map is fields_map's invert
     @attrs_map = fields_map.invert
 
+    # invert silently keeps the last column when several of them are mapped to
+    # the same field, and the values of the other ones are lost without a trace
+    duplicate = duplicate_field_mapping(fields_map)
+    if duplicate
+      flash[:error] = l(:error_duplicate_field_mapping,
+                        field: duplicate.first, columns: duplicate.last.join(', '))
+      return
+    end
+
     # validation!
     # if the unique_attr is blank but any of the following opts is turned on,
     if unique_attr.blank?
@@ -730,6 +739,20 @@ class ImporterController < ApplicationController
     end
   end
 
+  # Returns [field, [columns]] for the first field several columns are mapped
+  # to, or nil when the mapping is unambiguous.
+  def duplicate_field_mapping(fields_map)
+    columns_by_field = Hash.new { |hash, key| hash[key] = [] }
+
+    fields_map.each do |column, field|
+      next if field.blank?
+
+      columns_by_field[field] << column
+    end
+
+    columns_by_field.detect { |_field, columns| columns.size > 1 }
+  end
+
   def assignable?(field)
     raise unless ISSUE_ATTRS.include?(field.to_sym)
 
@@ -790,6 +813,8 @@ class ImporterController < ApplicationController
     # the user provided in the unique column (combined with the values of
     # the scope custom fields when such a scope is used)
     @issue_by_unique_attr = {}
+    # Identifiers already reported as matching too many issues
+    @too_many_candidates = Set.new
     # Cache of user id by login
     @user_by_login = {}
     # Cache of Version by name
@@ -976,7 +1001,8 @@ class ImporterController < ApplicationController
                       .where(query.statement)
                       .to_a
 
-    if candidates.size >= EXTRACTION_CANDIDATES_LIMIT
+    if candidates.size >= EXTRACTION_CANDIDATES_LIMIT && @too_many_candidates.add?(code)
+      # once per value, the same identifier is usually looked up many times
       @messages << l(:warning_extraction_too_many_candidates,
                      value: code, limit: EXTRACTION_CANDIDATES_LIMIT)
     end
@@ -1015,7 +1041,8 @@ class ImporterController < ApplicationController
       return
     end
 
-    @deferred_callbacks.register(target_key, callback_name, source_key, *args)
+    @deferred_callbacks.register(target_key, callback_name, source_key, *args,
+                                 column: column, scope: scope_description(row))
   end
 
   def fetch(key, row)

@@ -17,16 +17,19 @@ module RedmineImporter
 
     # Registers a callback to be executed when an issue with the given
     # unique_value is imported.
-    def register(unique_value, callback_name, *args)
+    # column and scope are only used in the messages, to tell which column of
+    # the file the unresolved reference came from and within which scope the
+    # target was looked for
+    def register(unique_value, callback_name, *args, column: nil, scope: nil)
       @pending[unique_value] ||= []
-      @pending[unique_value] << [callback_name, args]
+      @pending[unique_value] << [callback_name, args, column, scope]
     end
 
     # Executes pending callbacks for the given unique_value.
     def execute(unique_value, object)
       return unless (callbacks = @pending.delete(unique_value))
 
-      callbacks.each do |name, args|
+      callbacks.each do |name, args, _column, _scope|
         send(:"#{name}_callback", object, *args)
       end
     end
@@ -34,8 +37,10 @@ module RedmineImporter
     # Adds warning messages for any callbacks that were never resolved.
     def warn_unresolved
       @pending.each do |unique_value, callbacks|
-        callbacks.each do |name, _args|
-          @messages << "Warning: Deferred #{name} for '#{display_value(unique_value)}' " \
+        callbacks.each do |name, _args, column, scope|
+          source = column.present? ? " of the column '#{column}'" : ''
+          @messages << "Warning: Deferred #{name} for " \
+                       "'#{display_value(unique_value)}'#{source}#{scope} " \
                        'was never resolved (target issue not found in CSV)'
         end
       end
