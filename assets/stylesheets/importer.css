@@ -25,3 +25,61 @@ display: inline-block;
 #extract_unique_value_wrapper input#unique_value_separator {
   text-align: center;
 }
+
+/* Pop-up hints replacing the explanations that used to be printed inline */
+.importer-hint {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 4px;
+  outline: none;
+}
+
+.importer-hint .importer-hint-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: bold;
+  font-style: normal;
+  color: #fff;
+  background-color: #628db6;
+  border-radius: 50%;
+  cursor: help;
+  user-select: none;
+}
+
+.importer-hint:hover .importer-hint-icon,
+.importer-hint:focus .importer-hint-icon {
+  background-color: #3d6e9e;
+}
+
+.importer-hint .importer-hint-text {
+  display: none;
+  position: absolute;
+  z-index: 100;
+  top: 20px;
+  left: 0;
+  width: 420px;
+  max-width: 60vw;
+  padding: 6px 8px;
+  border: 1px solid #999;
+  border-radius: 3px;
+  background-color: #fff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  font-size: 0.85em;
+  font-style: normal;
+  font-weight: normal;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  color: #505050;
+}
+
+.importer-hint:hover .importer-hint-text,
+.importer-hint:focus .importer-hint-text,
+.importer-hint:focus-within .importer-hint-text {
+  display: block;
+}

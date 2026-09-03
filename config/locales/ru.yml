@@ -16,6 +16,7 @@ ru:
   label_importer_send_emails: "Уведомить участников по e-mail"
   label_importer_add_categories: "Создать несуществующие категории"
   label_importer_add_versions: "Создать несуществующие версии"
+  label_importer_use_anonymous: "Заменять неизвестных пользователей анонимным пользователем"
   label_importer_use_issue_id: "Импорт с использованием ID задач"
   label_update_issue: "Обновить существующие задачи при совпадении"
   label_journal_field: "Выберите колонку используемую как описание:"
@@ -50,7 +51,6 @@ ru:
   text_rmi_specify_unique_field_for_update: "Колонка с уникальными значениями должна быть определена, так как включен режим обновления существующих задач включен"
   text_rmi_specify_unique_field_for_column: "Unique field must be specified because the column %{column} needs to refer to other tasks"
 
-  label_importer_use_issue_id: "Import using issue ids"
   error_no_import_in_progress: "No import is currently in progress"
   error_import_superseded: "You seem to have started another import since starting this one. This import cannot be completed"
   error_must_map_id_column: "You must specify a column mapping for id when importing using provided issue ids."

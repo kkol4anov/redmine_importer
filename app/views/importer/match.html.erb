@@ -54,7 +54,7 @@
         <%= check_box_tag "unique_scope_tracker", true, true %>
         <%= l(:label_unique_scope_tracker) %>
       </label>
-      <em class="info"><%= l(:label_unique_scope_tracker_info) %></em>
+      <%= importer_hint(l(:label_unique_scope_tracker_info)) %>
     </div>
     <br/>
 
@@ -69,7 +69,7 @@
             :name => 'unique_scope_fields[]' %>
           <span class="toggle-multiselect icon-only"><%= sprite_icon('') if respond_to?(:sprite_icon) %></span>
         </span>
-        <em class="info"><%= l(:label_unique_scope_fields_info) %></em>
+        <%= importer_hint(l(:label_unique_scope_fields_info)) %>
       </div>
       <br/>
     <% end %>
@@ -79,6 +79,7 @@
         <%= check_box_tag "extract_unique_value", true, false %>
         <%= l(:label_extract_unique_value) %>
       </label>
+      <%= importer_hint(l(:label_extract_unique_value_info)) %>
       <br/>
 
       <span class="extraction-options">
@@ -106,8 +107,6 @@
         </label>
         <br/>
       </span>
-
-      <em class="info"><%= l(:label_extract_unique_value_info) %></em>
     </div>
     <br/>
 
@@ -117,17 +116,17 @@
     </label>
     <br/>
     <label>
-      <%= check_box_tag "add_categories", true, true %>
+      <%= check_box_tag "add_categories", true, false %>
       <%= l(:label_importer_add_categories) %>
     </label>
     <br/>
     <label>
-      <%= check_box_tag "add_versions", true, true %>
+      <%= check_box_tag "add_versions", true, false %>
       <%= l(:label_importer_add_versions) %>
     </label>
     <br/>
     <label>
-      <%= check_box_tag "use_anonymous", true, true %>
+      <%= check_box_tag "use_anonymous", true, false %>
       <%= l(:label_importer_use_anonymous) %>
     </label>
     <br/>
