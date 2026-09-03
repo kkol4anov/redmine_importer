@@ -3,7 +3,9 @@
 require 'csv'
 require 'tempfile'
 
-MultipleIssuesForUniqueValue = Class.new(RuntimeError)
+class MultipleIssuesForUniqueValue < RuntimeError
+  attr_accessor :issue_ids
+end
 NoIssueForUniqueValue = Class.new(RuntimeError)
 UnusableUniqueField = Class.new(RuntimeError)
 
@@ -19,6 +21,7 @@ class ImporterController < ApplicationController
   STANDARD_FIELD_TO_FILTER = {
   'standard_field-id' => 'issue_id',
   'standard_field-subject' => 'subject',
+  'standard_field-description' => 'description',
   'standard_field-status' => 'status_id',
   'standard_field-tracker' => 'tracker_id',
   'standard_field-assigned_to' => 'assigned_to_id',
@@ -28,6 +31,25 @@ class ImporterController < ApplicationController
   'standard_field-priority' => 'priority_id',
   'standard_field-parent_issue' => 'parent_id',
 }.freeze
+
+  # Optional extraction of the identifier from a text field.
+  # The values are expected in the "<text> <separator> <code>" format,
+  # e.g. "Set counter | ABC-123".
+  UNIQUE_VALUE_DEFAULT_SEPARATOR = '|'
+  # Standard fields (already translated to the filter names) the identifier
+  # may be extracted from
+  TEXT_UNIQUE_FILTERS = %w[subject description].freeze
+  # Custom field formats supporting the "contains" (~) filter operator
+  TEXT_CUSTOM_FIELD_FORMATS = %w[string text link].freeze
+  # Special marks that may follow the identifier, separated from it by a space,
+  # e.g. "Set counter | ABC-123 [DUPLICATE]". They are cut off and do not take
+  # part in the matching.
+  UNIQUE_VALUE_MARKS = /(?:\s+\[[^\[\]]*\])+\z/
+  # A value consisting of a single mark carries no identifier at all
+  UNIQUE_VALUE_MARK_ONLY = /\A\[[^\[\]]*\]\z/
+  # Max number of candidates loaded by a substring lookup before the exact
+  # match is checked in Ruby
+  EXTRACTION_CANDIDATES_LIMIT = 100
 
   def index; end
 
@@ -151,6 +173,15 @@ class ImporterController < ApplicationController
     # attrs_map is fields_map's invert
     @attrs_map = fields_map.invert
 
+    # invert silently keeps the last column when several of them are mapped to
+    # the same field, and the values of the other ones are lost without a trace
+    duplicate = duplicate_field_mapping(fields_map)
+    if duplicate
+      flash[:error] = l(:error_duplicate_field_mapping,
+                        field: duplicate.first, columns: duplicate.last.join(', '))
+      return
+    end
+
     # validation!
     # if the unique_attr is blank but any of the following opts is turned on,
     if unique_attr.blank?
@@ -174,12 +205,26 @@ class ImporterController < ApplicationController
     @unique_scope_fields = build_unique_scope_fields(unique_attr)
     return if flash[:error].present?
 
+    # optional extraction of the identifier from the text of the unique column
+    init_unique_value_extraction
+
     # translate unique attr to the filter name and checking of usability
     if unique_attr.present?
       unique_attr = translate_unique_attr(unique_field, unique_attr)
       if unique_attr.nil? ||
         unique_attr.start_with?('standard_field-')
         flash[:error] = l(:error_unique_field_not_usable, field: fields_map[unique_field])
+        return
+      end
+    end
+
+    # the identifier can only be extracted from a text-like field
+    if extract_unique_value?
+      if unique_attr.blank?
+        flash[:error] = l(:error_extraction_without_unique_field)
+        return
+      elsif !text_unique_attr?(unique_attr)
+        flash[:error] = l(:error_unique_field_not_text, field: fields_map[unique_field])
         return
       end
     end
@@ -303,8 +348,13 @@ class ImporterController < ApplicationController
       if issue_saved
         if unique_field
           row_key = unique_attr_cache_key(row[unique_field], row)
-          @issue_by_unique_attr[row_key] = issue
-          @deferred_callbacks.execute(row_key, issue)
+          if row_key
+            @issue_by_unique_attr[row_key] = issue
+            @deferred_callbacks.execute(row_key, issue)
+          else
+            @messages << l(:warning_unique_value_not_extracted,
+                           value: row[unique_field], column: unique_field)
+          end
         end
 
         if send_emails
@@ -332,17 +382,18 @@ class ImporterController < ApplicationController
               # false, use cache-based lookup to support deferred reference
               # resolution.
               if csv_internal_ids?
-                other_issue = @issue_by_unique_attr[unique_attr_cache_key(other_value, row)]
+                other_key = unique_attr_cache_key(other_value, row, reference: true)
+                other_issue = other_key && @issue_by_unique_attr[other_key]
                 unless other_issue
                   # Target not in cache yet - register callback for deferred creation
-                  @deferred_callbacks.register(unique_attr_cache_key(other_value, row),
-                                               :add_relation,
-                                               unique_attr_cache_key(row[unique_field], row),
-                                               rtype)
+                  register_deferred_reference(other_value, :add_relation,
+                                              row, unique_field, rtype,
+                                              column: @attrs_map["issue_relation-#{rtype}"])
                   next
                 end
               else
-                other_issue = issue_for_unique_attr(unique_attr, other_value, row)
+                other_issue = issue_for_unique_attr(unique_attr, other_value, row,
+                                                    reference: true)
               end
 
               already_related = issue.relations.any? do |r|
@@ -360,10 +411,9 @@ class ImporterController < ApplicationController
             rescue NoIssueForUniqueValue
               # Register callback for deferred relation creation
               # Target issue may appear later in CSV
-              @deferred_callbacks.register(unique_attr_cache_key(other_value, row),
-                                           :add_relation,
-                                           unique_attr_cache_key(row[unique_field], row),
-                                           rtype)
+              register_deferred_reference(other_value, :add_relation,
+                                          row, unique_field, rtype,
+                                          column: @attrs_map["issue_relation-#{rtype}"])
             rescue MultipleIssuesForUniqueValue
               @messages << "Warning: Multiple matches for relation target '#{other_value}'"
             end
@@ -540,11 +590,16 @@ class ImporterController < ApplicationController
   # Cache key of an issue: the unique value alone when no scope is used
   # (keeps the previous behaviour untouched), the unique value combined
   # with the scope values otherwise.
-  def unique_attr_cache_key(attr_value, row)
-    filters = unique_scope_filters(row)
-    return attr_value if filters.blank?
+  # Returns nil when the extraction is enabled but no identifier can be
+  # extracted from the given value.
+  def unique_attr_cache_key(attr_value, row, reference: false)
+    key_value = extract_unique_value(attr_value, reference: reference)
+    return nil if key_value.nil?
 
-    ([attr_value] + filters.map do |filter, operator, values|
+    filters = unique_scope_filters(row)
+    return key_value if filters.blank?
+
+    ([key_value] + filters.map do |filter, operator, values|
       "#{filter}#{operator}#{Array(values).join(',')}"
     end).join(RedmineImporter::DeferredCallbacks::KEY_SEPARATOR)
   end
@@ -613,10 +668,11 @@ class ImporterController < ApplicationController
                                                       value: "#{row[unique_field]}#{scope_description(row)}"))
           raise RowFailed
         end
-      rescue MultipleIssuesForUniqueValue
+      rescue MultipleIssuesForUniqueValue => e
+        matches = e.issue_ids.present? ? " [#{e.issue_ids.map { |id| "##{id}" }.join(', ')}]" : ''
         log_failure(row,
                     l(:warning_multiple_matches_for_update, issue_num: @failed_count + 1,
-                                                            value: "#{row[unique_field]}#{scope_description(row)}"))
+                                                            value: "#{row[unique_field]}#{scope_description(row)}#{matches}"))
         raise RowFailed
       end
     end
@@ -683,6 +739,20 @@ class ImporterController < ApplicationController
     end
   end
 
+  # Returns [field, [columns]] for the first field several columns are mapped
+  # to, or nil when the mapping is unambiguous.
+  def duplicate_field_mapping(fields_map)
+    columns_by_field = Hash.new { |hash, key| hash[key] = [] }
+
+    fields_map.each do |column, field|
+      next if field.blank?
+
+      columns_by_field[field] << column
+    end
+
+    columns_by_field.detect { |_field, columns| columns.size > 1 }
+  end
+
   def assignable?(field)
     raise unless ISSUE_ATTRS.include?(field.to_sym)
 
@@ -699,25 +769,25 @@ class ImporterController < ApplicationController
     # the # column is used only for CSV-internal references.
     # Use cache-based lookup to support deferred reference resolution.
     if csv_internal_ids?
-      if cached_parent = @issue_by_unique_attr[unique_attr_cache_key(parent_value, row)]
+      parent_key = unique_attr_cache_key(parent_value, row, reference: true)
+      if parent_key && (cached_parent = @issue_by_unique_attr[parent_key])
         issue.parent_issue_id = cached_parent.id
       else
         # Parent not in cache yet - register callback for deferred assignment
-        @deferred_callbacks.register(unique_attr_cache_key(parent_value, row),
-                                     :set_parent,
-                                     unique_attr_cache_key(row[unique_field], row))
+        register_deferred_reference(parent_value, :set_parent, row, unique_field,
+                                    column: @attrs_map['standard_field-parent_issue'])
       end
       return
     end
 
     # Standard lookup via issue_for_unique_attr
-    issue.parent_issue_id = issue_for_unique_attr(unique_attr, parent_value, row).id
+    issue.parent_issue_id = issue_for_unique_attr(unique_attr, parent_value, row,
+                                                  reference: true).id
   rescue NoIssueForUniqueValue
     # Register callback for deferred parent assignment
     # Parent issue may appear later in CSV
-    @deferred_callbacks.register(unique_attr_cache_key(parent_value, row),
-                                 :set_parent,
-                                 unique_attr_cache_key(row[unique_field], row))
+    register_deferred_reference(parent_value, :set_parent, row, unique_field,
+                                column: @attrs_map['standard_field-parent_issue'])
   rescue MultipleIssuesForUniqueValue
     @failed_count += 1
     @failed_issues[@failed_count] = row
@@ -737,10 +807,14 @@ class ImporterController < ApplicationController
     @unique_scope_fields = []
     # Whether the unique column is mapped to the issue id
     @unique_attr_is_issue_id = false
+    # Settings of the identifier extraction from a text field (nil when off)
+    @unique_value_extraction = nil
     # This is a cache of previously inserted issues indexed by the value
     # the user provided in the unique column (combined with the values of
     # the scope custom fields when such a scope is used)
     @issue_by_unique_attr = {}
+    # Identifiers already reported as matching too many issues
+    @too_many_candidates = Set.new
     # Cache of user id by login
     @user_by_login = {}
     # Cache of Version by name
@@ -840,6 +914,135 @@ class ImporterController < ApplicationController
   # already imported issues, possibly deferred until the target row is read.
   def csv_internal_ids?
     @unique_attr_is_issue_id && !use_issue_id
+  end
+
+  # --- Extraction of the identifier from a text field ------------------------
+  #
+  # When enabled, the unique value is not the whole value of the field but only
+  # a part of it. The values are expected in the "<text> <separator> <code>"
+  # format, e.g. "Установить счётчик | ABC-123" with the "|" separator.
+  #
+  # The extraction is applied to both sides of the comparison: to the value of
+  # the CSV cell and to the value stored in Redmine. This way the issues keep
+  # matching even when the text part has been edited.
+
+  def init_unique_value_extraction
+    @unique_value_extraction =
+      if params[:extract_unique_value].present?
+        {
+          separator: params[:unique_value_separator].presence || UNIQUE_VALUE_DEFAULT_SEPARATOR,
+          part: params[:unique_value_part] == 'first' ? 'first' : 'last',
+          keep_whole: params[:unique_value_keep_whole].present?
+        }
+      end
+  end
+
+  def extract_unique_value?
+    @unique_value_extraction.present?
+  end
+
+  # Returns the identifier extracted from the raw value.
+  # Returns the raw value untouched when the extraction is disabled, and nil
+  # when no identifier can be extracted (unless keep_whole is on).
+  # reference: the value comes from a column referring to another issue
+  # (parent issue, related issues). Such a column holds the identifier itself,
+  # not the "<text> <separator> <code>" pair, so a value without the separator
+  # is taken as the identifier as is. Both spellings are accepted, because the
+  # references are often copied from the same column as the unique values.
+  def extract_unique_value(raw_value, reference: false)
+    return raw_value if raw_value.nil? || !extract_unique_value?
+
+    value = raw_value.to_s
+    separator = @unique_value_extraction[:separator]
+
+    unless value.include?(separator)
+      keep_whole = reference || @unique_value_extraction[:keep_whole]
+      return keep_whole ? strip_unique_value_marks(value) : nil
+    end
+
+    # -1 keeps the trailing empty parts, so "Text | " yields no identifier
+    parts = value.split(separator, -1).map(&:strip)
+    code = @unique_value_extraction[:part] == 'first' ? parts.first : parts.last
+
+    strip_unique_value_marks(code)
+  end
+
+  # Cuts the trailing marks off: "ABC-123 [DUPLICATE]" -> "ABC-123".
+  # A mark has to be separated by a space, so "ABC-123[1]" stays untouched -
+  # there the brackets are part of the identifier itself.
+  # Returns nil when nothing but a mark is left.
+  def strip_unique_value_marks(value)
+    stripped = value.to_s.strip
+    return nil if stripped.match?(UNIQUE_VALUE_MARK_ONLY)
+
+    stripped.sub(UNIQUE_VALUE_MARKS, '').strip.presence
+  end
+
+  # Only the text-like fields supporting the "contains" (~) filter operator
+  # may carry an embedded identifier
+  def text_unique_attr?(unique_attr)
+    return true if TEXT_UNIQUE_FILTERS.include?(unique_attr)
+    return false unless unique_attr.to_s.start_with?('cf_')
+
+    cf = IssueCustomField.find_by(id: unique_attr.delete_prefix('cf_'))
+    cf.present? && TEXT_CUSTOM_FIELD_FORMATS.include?(cf.field_format)
+  end
+
+  # Looks up the issues whose text field contains the identifier
+  # (SQL LIKE '%code%'), then keeps only those whose extracted value matches
+  # the identifier exactly.
+  def issues_by_extracted_value(unique_attr, code, row_data)
+    query = build_unique_query(unique_attr, '~', code, row_data)
+
+    candidates = Issue.joins([:project])
+                      .includes(%i[assigned_to status tracker project priority
+                                   category fixed_version])
+                      .limit(EXTRACTION_CANDIDATES_LIMIT)
+                      .where(query.statement)
+                      .to_a
+
+    if candidates.size >= EXTRACTION_CANDIDATES_LIMIT && @too_many_candidates.add?(code)
+      # once per value, the same identifier is usually looked up many times
+      @messages << l(:warning_extraction_too_many_candidates,
+                     value: code, limit: EXTRACTION_CANDIDATES_LIMIT)
+    end
+
+    candidates.select do |issue|
+      extract_unique_value(issue_field_value(issue, unique_attr)) == code
+    end
+  end
+
+  # The raw value of the field the identifier is extracted from
+  def issue_field_value(issue, unique_attr)
+    if unique_attr.to_s.start_with?('cf_')
+      issue.custom_field_value(unique_attr.delete_prefix('cf_').to_i)
+    else
+      issue.public_send(unique_attr)
+    end
+  end
+
+  # Registers a deferred callback for a reference that cannot be resolved yet.
+  # Skips it with a warning when no identifier can be extracted from either
+  # the referenced value or the unique value of the current row.
+  def register_deferred_reference(target_value, callback_name, row, unique_field, *args,
+                                  column: nil)
+    target_key = unique_attr_cache_key(target_value, row, reference: true)
+    source_key = unique_attr_cache_key(row[unique_field], row)
+
+    if target_key.nil?
+      @messages << l(:warning_reference_value_not_extracted,
+                     value: target_value, column: column)
+      return
+    end
+
+    if source_key.nil?
+      @messages << l(:warning_unique_value_not_extracted,
+                     value: row[unique_field], column: unique_field)
+      return
+    end
+
+    @deferred_callbacks.register(target_key, callback_name, source_key, *args,
+                                 column: column, scope: scope_description(row))
   end
 
   def fetch(key, row)
@@ -970,8 +1173,15 @@ class ImporterController < ApplicationController
 
   # Returns the issue object associated with the given value of the given attribute.
   # Raises NoIssueForUniqueValue if not found or MultipleIssuesForUniqueValue
-  def issue_for_unique_attr(unique_attr, attr_value, row_data)
-    cache_key = unique_attr_cache_key(attr_value, row_data)
+  def issue_for_unique_attr(unique_attr, attr_value, row_data, reference: false)
+    lookup_value = extract_unique_value(attr_value, reference: reference)
+    if lookup_value.nil?
+      raise NoIssueForUniqueValue,
+        "No identifier could be extracted from '#{attr_value}' with the " \
+        "separator '#{@unique_value_extraction[:separator]}'"
+    end
+
+    cache_key = unique_attr_cache_key(attr_value, row_data, reference: reference)
     if @issue_by_unique_attr.key?(cache_key)
       return @issue_by_unique_attr[cache_key]
     end
@@ -982,25 +1192,10 @@ class ImporterController < ApplicationController
           "Value '#{attr_value}' is not a valid issue id"
       end
       issues = [Issue.find_by_id(attr_value)].compact
+    elsif extract_unique_value?
+      issues = issues_by_extracted_value(unique_attr, lookup_value, row_data)
     else
-      query = new_importer_query
-      query.add_filter('status_id', '*', [1])
-      query.add_filter(unique_attr, '=', [attr_value])
-
-      unless query.filters.key?(unique_attr)
-        raise UnusableUniqueField,
-          "Field '#{unique_attr}' is not available as a query filter"
-      end
-
-      # narrow the matching scope down with the selected custom fields
-      unique_scope_filters(row_data).each do |filter, operator, values|
-        query.add_filter(filter, operator, values)
-
-        unless query.filters.key?(filter)
-          raise UnusableUniqueField,
-            "Field '#{filter}' is not available as a query filter"
-        end
-      end
+      query = build_unique_query(unique_attr, '=', attr_value, row_data)
 
       issues = Issue.joins([:project])
                     .includes(%i[assigned_to status tracker project priority
@@ -1011,14 +1206,41 @@ class ImporterController < ApplicationController
 
     if issues.size > 1
       # counting and message are on a caller side
-      raise MultipleIssuesForUniqueValue, "Unique field #{unique_attr} with" \
-        " value '#{attr_value}'#{scope_description(row_data)} has duplicate record"
+      error = MultipleIssuesForUniqueValue.new("Unique field #{unique_attr} with" \
+        " value '#{lookup_value}'#{scope_description(row_data)} has duplicate record")
+      error.issue_ids = issues.map(&:id)
+      raise error
     elsif issues.empty? || issues[0].nil?
       raise NoIssueForUniqueValue,
-        "No issue with #{unique_attr} of '#{attr_value}'#{scope_description(row_data)} found"
+        "No issue with #{unique_attr} of '#{lookup_value}'#{scope_description(row_data)} found"
     else
       issues.first
     end
+  end
+
+  # Builds the importer query for the unique value, narrowed down with the
+  # selected scope custom fields.
+  def build_unique_query(unique_attr, operator, value, row_data)
+    query = new_importer_query
+    query.add_filter('status_id', '*', [1])
+    query.add_filter(unique_attr, operator, [value])
+
+    unless query.filters.key?(unique_attr)
+      raise UnusableUniqueField,
+        "Field '#{unique_attr}' is not available as a query filter"
+    end
+
+    # narrow the matching scope down with the selected custom fields
+    unique_scope_filters(row_data).each do |filter, filter_operator, values|
+      query.add_filter(filter, filter_operator, values)
+
+      unless query.filters.key?(filter)
+        raise UnusableUniqueField,
+          "Field '#{filter}' is not available as a query filter"
+      end
+    end
+
+    query
   end
 
   # Returns the user matching the given keyword or raises RecordNotFound

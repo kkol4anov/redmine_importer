@@ -73,6 +73,44 @@
       </div>
       <br/>
     <% end %>
+
+    <div id="extract_unique_value_wrapper">
+      <label>
+        <%= check_box_tag "extract_unique_value", true, false %>
+        <%= l(:label_extract_unique_value) %>
+      </label>
+      <br/>
+
+      <span class="extraction-options">
+        &nbsp;&nbsp;&nbsp;&nbsp;
+        <label>
+          <%= l(:label_unique_value_separator) %>
+          <%= text_field_tag "unique_value_separator",
+            ImporterController::UNIQUE_VALUE_DEFAULT_SEPARATOR,
+            :size => 3, :disabled => true %>
+        </label>
+        &nbsp;&nbsp;
+        <label>
+          <%= l(:label_unique_value_part) %>
+          <%= select_tag "unique_value_part",
+            options_for_select([[l(:label_unique_value_part_last), 'last'],
+                                [l(:label_unique_value_part_first), 'first']]),
+            {:disabled => true} %>
+        </label>
+        <br/>
+
+        &nbsp;&nbsp;&nbsp;&nbsp;
+        <label>
+          <%= check_box_tag "unique_value_keep_whole", true, false, {:disabled => true} %>
+          <%= l(:label_unique_value_keep_whole) %>
+        </label>
+        <br/>
+      </span>
+
+      <em class="info"><%= l(:label_extract_unique_value_info) %></em>
+    </div>
+    <br/>
+
     <label>
       <%= check_box_tag "send_emails", true, false %>
       <%= l(:label_importer_send_emails) %>
@@ -172,6 +210,26 @@
 
     $('#unique_field, select[name^="fields_map"]').on('change', toggleUniqueScopeFields);
     toggleUniqueScopeFields();
+
+    // The identifier is extracted from the text of a field, so the extraction
+    // makes no sense when the issues are matched by their id.
+    function toggleExtractUniqueValue() {
+      var wrapper = $('#extract_unique_value_wrapper');
+      if (!wrapper.length) { return; }
+
+      var matchedById = uniqueColumnMapping() === 'standard_field-id';
+      wrapper.toggle(!matchedById);
+      if (matchedById) { $('#extract_unique_value').prop('checked', false); }
+
+      var enabled = !matchedById && $('#extract_unique_value').is(':checked');
+      $('#unique_value_separator, #unique_value_part, #unique_value_keep_whole')
+        .prop('disabled', !enabled);
+      $('#extract_unique_value_wrapper .extraction-options').toggle(enabled);
+    }
+
+    $('#unique_field, select[name^="fields_map"], #extract_unique_value')
+      .on('change', toggleExtractUniqueValue);
+    toggleExtractUniqueValue();
 
     $('#map_form').on('submit', function() {
       $('#import-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});

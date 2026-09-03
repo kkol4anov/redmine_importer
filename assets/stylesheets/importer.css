@@ -16,3 +16,12 @@ display: inline-block;
 #unique_scope_fields_wrapper .unique-scope-picker { white-space: nowrap; }
 
 #unique_scope_fields_wrapper select[multiple] { vertical-align: middle; }
+
+/* Extraction of the identifier from the text of the unique column */
+#extract_unique_value_wrapper { margin: 4px 0; }
+
+#extract_unique_value_wrapper .extraction-options { display: none; }
+
+#extract_unique_value_wrapper input#unique_value_separator {
+  text-align: center;
+}
