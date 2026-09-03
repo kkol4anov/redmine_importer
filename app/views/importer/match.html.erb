@@ -35,32 +35,31 @@
 
   <fieldset class="box">
     <legend><%= l(:label_import_rule) %></legend>
+    
     <label>
-      <%= l(:label_default_tracker) %>
-      <%= select_tag "default_tracker",
-        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
+      <%= check_box_tag "use_issue_id", true, false %>
+      <%= l(:label_importer_use_issue_id) %>
     </label>
     <br/>
-    <label>
-      <%= l(:label_unique_field) %>
+
+    <div class="rule-row">
+      <label class="rule-label" for="default_tracker"><%= l(:label_default_tracker) %></label>
+      <%= select_tag "default_tracker",
+        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
+    </div>
+
+    <div class="rule-row">
+      <label class="rule-label" for="unique_field"><%= l(:label_unique_field) %></label>
       <%= select_tag "unique_field",
         raw("<option value=\"\">#{l(:option_ignore)}</option>") +
         options_for_select(@headers.map{|header| force_utf8(header)}) %>
-    </label>
-    <br/>
-
-    <div id="unique_scope_tracker_wrapper">
-      <label>
-        <%= check_box_tag "unique_scope_tracker", true, true %>
-        <%= l(:label_unique_scope_tracker) %>
-      </label>
-      <%= importer_hint(l(:label_unique_scope_tracker_info)) %>
+      <%= importer_hint(l(:label_unique_field_info)) %>
     </div>
-    <br/>
+
 
     <% if @scope_attrs.present? %>
-      <div id="unique_scope_fields_wrapper">
-        <label for="unique_scope_fields"><%= l(:label_unique_scope_fields) %></label>
+      <div id="unique_scope_fields_wrapper" class="rule-row">
+        <label class="rule-label" for="unique_scope_fields"><%= l(:label_unique_scope_fields) %></label>
         <span class="unique-scope-picker">
           <%= select_tag "unique_scope_fields",
             raw("<option value=\"\">#{l(:option_ignore)}</option>") +
@@ -71,9 +70,16 @@
         </span>
         <%= importer_hint(l(:label_unique_scope_fields_info)) %>
       </div>
-      <br/>
     <% end %>
 
+    <div id="unique_scope_tracker_wrapper">
+      <label>
+        <%= check_box_tag "unique_scope_tracker", true, true %>
+        <%= l(:label_unique_scope_tracker) %>
+      </label>
+      <%= importer_hint(l(:label_unique_scope_tracker_info)) %>
+    </div>
+    
     <div id="extract_unique_value_wrapper">
       <label>
         <%= check_box_tag "extract_unique_value", true, false %>
@@ -108,7 +114,6 @@
         <br/>
       </span>
     </div>
-    <br/>
 
     <label>
       <%= check_box_tag "send_emails", true, false %>
@@ -128,11 +133,6 @@
     <label>
       <%= check_box_tag "use_anonymous", true, false %>
       <%= l(:label_importer_use_anonymous) %>
-    </label>
-    <br/>
-    <label>
-      <%= check_box_tag "use_issue_id", true, false %>
-      <%= l(:label_importer_use_issue_id) %>
     </label>
     <br/>
     <label>
