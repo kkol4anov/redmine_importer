@@ -99,3 +99,20 @@ display: inline-block;
 .importer-hint:focus-within .importer-hint-text {
   display: block;
 }
+
+/* Controls switched off by another option: they stay visible so that the
+   current configuration remains readable, but are clearly inactive */
+.importer-disabled { opacity: 0.5; }
+
+/* Warning shown next to an option whose prerequisites are not met yet */
+.importer-warning {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid #e0c05a;
+  border-radius: 3px;
+  background-color: #ffffdd;
+  color: #8a6100;
+  font-size: 0.9em;
+  vertical-align: middle;
+}

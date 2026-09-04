@@ -156,16 +156,13 @@ class ImporterController < ApplicationController
     ignore_non_exist = params[:ignore_non_exist]
 
     # which fields should we use? what maps to what?
-    unique_field = params[:unique_field].empty? ? nil : params[:unique_field]
+    # the drop-down is disabled when the issues are imported with their ids,
+    # so the parameter may be missing altogether
+    unique_field = params[:unique_field].presence
 
     fields_map = {}
     params[:fields_map].each { |k, v| fields_map[k.unpack('U*').pack('U*')] = v }
     unique_attr = fields_map[unique_field]
-    # translate_unique_attr below replaces 'standard_field-id' with the name of
-    # the query filter ('issue_id'), so the raw mapping has to be remembered
-    # before the translation to be able to tell later that the issues are
-    # matched by their id
-    @unique_attr_is_issue_id = unique_attr == 'standard_field-id'
 
     default_tracker = params[:default_tracker]
     journal_field = params[:journal_field]
@@ -181,6 +178,28 @@ class ImporterController < ApplicationController
                         field: duplicate.first, columns: duplicate.last.join(', '))
       return
     end
+
+    # Importing the issues with their own ids means matching them by the id.
+    # An id is unique by itself, so the whole "unique values" configuration
+    # (the column, the boundaries of its matching and the extraction of the
+    # identifier from its text) does not apply. The corresponding controls are
+    # disabled in the form; the values that still may reach the server are
+    # ignored here, so that the behaviour never depends on them.
+    if use_issue_id
+      unique_field = @attrs_map['standard_field-id']
+      if unique_field.blank?
+        flash[:error] = l(:error_must_map_id_column)
+        return
+      end
+
+      unique_attr = 'standard_field-id'
+    end
+
+    # translate_unique_attr below replaces 'standard_field-id' with the name of
+    # the query filter ('issue_id'), so the raw mapping has to be remembered
+    # before the translation to be able to tell later that the issues are
+    # matched by their id
+    @unique_attr_is_issue_id = unique_attr == 'standard_field-id'
 
     # validation!
     # if the unique_attr is blank but any of the following opts is turned on,
@@ -226,13 +245,6 @@ class ImporterController < ApplicationController
       elsif !text_unique_attr?(unique_attr)
         flash[:error] = l(:error_unique_field_not_text, field: fields_map[unique_field])
         return
-      end
-    end
-
-    # validate that the id attribute has been selected
-    if use_issue_id
-      if @attrs_map['standard_field-id'].blank?
-        flash[:error] = l(:error_must_map_id_column)
       end
     end
 
@@ -477,6 +489,7 @@ class ImporterController < ApplicationController
   def build_unique_scope_fields(raw_unique_attr)
     # the id of an issue is unique by itself, no scope is needed (and the
     # tracker of the row may well be the new tracker of an existing issue)
+    return [] if use_issue_id
     return [] if raw_unique_attr.blank? || raw_unique_attr == 'standard_field-id'
 
     fields = [tracker_scope_field].compact
@@ -927,8 +940,9 @@ class ImporterController < ApplicationController
   # matching even when the text part has been edited.
 
   def init_unique_value_extraction
+    # nothing to extract from an id
     @unique_value_extraction =
-      if params[:extract_unique_value].present?
+      if params[:extract_unique_value].present? && !use_issue_id
         {
           separator: params[:unique_value_separator].presence || UNIQUE_VALUE_DEFAULT_SEPARATOR,
           part: params[:unique_value_part] == 'first' ? 'first' : 'last',
