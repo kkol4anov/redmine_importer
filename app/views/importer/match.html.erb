@@ -40,6 +40,10 @@
       <%= check_box_tag "use_issue_id", true, false %>
       <%= l(:label_importer_use_issue_id) %>
     </label>
+    <%= importer_hint(l(:label_importer_use_issue_id_info)) %>
+    <span id="use_issue_id_warning" class="importer-warning" style="display: none;">
+      <%= l(:warning_id_column_not_mapped) %>
+    </span>
     <br/>
 
     <div class="rule-row">
@@ -48,7 +52,7 @@
         options_from_collection_for_select(@project.trackers, 'id', 'name') %>
     </div>
 
-    <div class="rule-row">
+    <div id="unique_field_wrapper" class="rule-row">
       <label class="rule-label" for="unique_field"><%= l(:label_unique_field) %></label>
       <%= select_tag "unique_field",
         raw("<option value=\"\">#{l(:option_ignore)}</option>") +
@@ -174,16 +178,37 @@
 
 <script type="text/javascript">
   $(document).ready(function() {
-    // The scope makes no sense when the issues are matched by their id:
-    // an id is unique by itself.
+    function fieldsMapSelects() {
+      return $('select[name^="fields_map"]');
+    }
+
+    // The field the column with the unique values is mapped to.
     function uniqueColumnMapping() {
       var column = $('#unique_field').val();
       if (!column) { return ''; }
 
-      var mapping = $('select[name^="fields_map"]').filter(function() {
+      var mapping = fieldsMapSelects().filter(function() {
         return this.name === 'fields_map[' + column + ']';
       });
       return mapping.val() || '';
+    }
+
+    // Is any column of the file mapped to the id of an issue?
+    function idColumnMapped() {
+      return fieldsMapSelects().filter(function() {
+        return $(this).val() === 'standard_field-id';
+      }).length > 0;
+    }
+
+    function importByIssueId() {
+      return $('#use_issue_id').is(':checked');
+    }
+
+    // The import by ids needs a column mapped to the id: the ids are read
+    // from it. Warn as soon as the option is turned on without such a column,
+    // the same condition is enforced on the server.
+    function toggleIdColumnWarning() {
+      $('#use_issue_id_warning').toggle(importByIssueId() && !idColumnMapped());
     }
 
     // Collapsed: a plain drop-down for a single field.
@@ -192,43 +217,61 @@
     // (toggleMultiSelect / toggleMultiSelectIconInit), exactly as in the filters.
     var scopeSelect = $('#unique_scope_fields');
 
-    function toggleUniqueScopeFields() {
-      // The scope makes no sense when the issues are matched by their id.
-      var matchedById = uniqueColumnMapping() === 'standard_field-id';
+    // The whole "unique values" configuration makes no sense when the issues
+    // are matched by their id: an id is unique by itself, there is nothing to
+    // narrow down and nothing to extract. That is the case when the import
+    // goes by the ids of the issues, and when the unique column itself is
+    // mapped to the id.
+    //
+    // The import by ids switches the controls off but keeps them visible, so
+    // that the configuration underneath stays readable. Disabled controls are
+    // not submitted, and the server ignores their values anyway.
+    function toggleUniqueMatching() {
+      var byIssueId = importByIssueId();
+      var uniqueColumnIsId = uniqueColumnMapping() === 'standard_field-id';
+      var inactive = byIssueId || uniqueColumnIsId;
+
+      // the column with the unique values is replaced by the id column
+      $('#unique_field').prop('disabled', byIssueId);
+      $('#unique_field_wrapper').toggleClass('importer-disabled', byIssueId);
 
       var trackerWrapper = $('#unique_scope_tracker_wrapper');
-      trackerWrapper.toggle(!matchedById);
-      $('#unique_scope_tracker').prop('disabled', matchedById);
+      trackerWrapper.toggle(!uniqueColumnIsId);
+      trackerWrapper.toggleClass('importer-disabled', inactive);
+      $('#unique_scope_tracker').prop('disabled', inactive);
 
-      var wrapper = $('#unique_scope_fields_wrapper');
-      if (!wrapper.length) { return; }
+      var scopeWrapper = $('#unique_scope_fields_wrapper');
+      if (scopeWrapper.length) {
+        scopeWrapper.toggle(!uniqueColumnIsId);
+        scopeWrapper.toggleClass('importer-disabled', inactive);
+        scopeSelect.prop('disabled', inactive);
+      }
 
-      wrapper.toggle(!matchedById);
-      scopeSelect.prop('disabled', matchedById);
+      var extractWrapper = $('#extract_unique_value_wrapper');
+      if (extractWrapper.length) {
+        extractWrapper.toggle(!uniqueColumnIsId);
+        extractWrapper.toggleClass('importer-disabled', inactive);
+        $('#extract_unique_value').prop('disabled', inactive);
+        // the option is meaningless for a column holding the ids, while the
+        // import by ids is a temporary switch and keeps the choice untouched
+        if (uniqueColumnIsId) { $('#extract_unique_value').prop('checked', false); }
+
+        var enabled = !inactive && $('#extract_unique_value').is(':checked');
+        $('#unique_value_separator, #unique_value_part, #unique_value_keep_whole')
+          .prop('disabled', !enabled);
+        extractWrapper.find('.extraction-options').toggle(enabled);
+      }
     }
 
-    $('#unique_field, select[name^="fields_map"]').on('change', toggleUniqueScopeFields);
-    toggleUniqueScopeFields();
-
-    // The identifier is extracted from the text of a field, so the extraction
-    // makes no sense when the issues are matched by their id.
-    function toggleExtractUniqueValue() {
-      var wrapper = $('#extract_unique_value_wrapper');
-      if (!wrapper.length) { return; }
-
-      var matchedById = uniqueColumnMapping() === 'standard_field-id';
-      wrapper.toggle(!matchedById);
-      if (matchedById) { $('#extract_unique_value').prop('checked', false); }
-
-      var enabled = !matchedById && $('#extract_unique_value').is(':checked');
-      $('#unique_value_separator, #unique_value_part, #unique_value_keep_whole')
-        .prop('disabled', !enabled);
-      $('#extract_unique_value_wrapper .extraction-options').toggle(enabled);
+    function refreshImportRules() {
+      toggleIdColumnWarning();
+      toggleUniqueMatching();
     }
 
-    $('#unique_field, select[name^="fields_map"], #extract_unique_value')
-      .on('change', toggleExtractUniqueValue);
-    toggleExtractUniqueValue();
+    $('#use_issue_id, #unique_field, #extract_unique_value')
+      .add(fieldsMapSelects())
+      .on('change', refreshImportRules);
+    refreshImportRules();
 
     $('#map_form').on('submit', function() {
       $('#import-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});

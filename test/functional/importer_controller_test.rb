@@ -950,6 +950,91 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal 'updated by importer', issue.reload.description
   end
 
+  test 'should require a column mapped to the id when importing by ids' do
+    @iip.update!(csv_data: "Subject,Description\nno id here,text\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      use_issue_id: '1',
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert flash[:error].present?, 'Expected an error for the missing id mapping'
+  end
+
+  test 'should import by ids without the unique column parameter' do
+    # the drop-down is disabled in the form, so the parameter never arrives
+    @iip.update!(csv_data: "#,Subject,Tracker,Status,Priority\n4711,created by id,Defect,New,Critical\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      use_issue_id: '1',
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker',
+        'Status' => 'standard_field-status',
+        'Priority' => 'standard_field-priority'
+      }
+    }
+    assert_response :success
+    assert_nil flash[:error]
+    assert_equal 'created by id', Issue.find(4711).subject
+  end
+
+  test 'should ignore the selected unique column when importing by ids' do
+    issue = create_issue!(@project, @user, { subject: 'original subject', tracker: @tracker })
+
+    # the column left over from before the option was turned on does not match
+    # anything: the issue has to be found by its id nevertheless
+    @iip.update!(csv_data: "#,Subject,Description\n#{issue.id},renamed subject,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      use_issue_id: '1',
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+
+    issue.reload
+    assert_equal 'renamed subject', issue.subject
+    assert_equal 'updated by importer', issue.description
+  end
+
+  test 'should ignore the identifier extraction when importing by ids' do
+    issue = create_issue!(@project, @user, { subject: 'plain subject', tracker: @tracker })
+
+    # there is no separator in the subject, so the extraction would yield
+    # nothing at all if it were applied
+    @iip.update!(csv_data: "#,Subject,Description\n#{issue.id},plain subject,updated by importer\n")
+    post :result, params: {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      use_issue_id: '1',
+      extract_unique_value: '1',
+      unique_value_separator: '|',
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Description' => 'standard_field-description'
+      }
+    }
+    assert_response :success
+    assert !response.body.include?('Warning')
+    assert_equal 'updated by importer', issue.reload.description
+  end
+
   test 'should match issues by the identifier extracted from the subject' do
     issue = create_issue!(@project, @user,
                           { subject: 'Old text | ABC-123', tracker: @tracker })
