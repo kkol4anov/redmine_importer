@@ -1559,6 +1559,65 @@ class ImporterControllerTest < ActionController::TestCase
     assert response.body.include?('Unchanged: 1')
   end
 
+  # --- Rows the file failed to describe -------------------------------------
+
+  test 'should not create an issue from a row with an empty matching value' do
+    assert_no_difference 'Issue.count' do
+      post :result, params: id_params(",a truncated line,Critical,\n")
+    end
+    assert_response :success
+
+    assert_equal 1, assigns(:failed_count)
+    assert response.body.include?('says nothing about which issue')
+  end
+
+  test 'should skip an unmatchable row when non-existant issues are ignored' do
+    assert_no_difference 'Issue.count' do
+      post :result, params: id_params(",a truncated line,Critical,\n",
+                                      ignore_non_exist: '1')
+    end
+    assert_response :success
+
+    assert_equal 1, assigns(:skip_count)
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'should not create an issue when no identifier can be extracted' do
+    create_issue!(@project, @user, { subject: 'No separator here', tracker: @tracker })
+
+    assert_no_difference 'Issue.count' do
+      post :result, params: extraction_params('No separator here,updated by importer')
+    end
+    assert_response :success
+
+    assert_equal 1, assigns(:failed_count)
+  end
+
+  test 'should create an issue from a row that does carry a matching value' do
+    assert_difference 'Issue.count', 1 do
+      post :result, params: id_params("999001,a whole line,Critical,\n")
+    end
+    assert_response :success
+
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'should report the rows carrying more fields than the file has headers' do
+    post :result, params: id_params("#{@issue.id},foobar,Critical,,stray\n")
+    assert_response :success
+
+    assert_equal 1, assigns(:ragged_rows)
+    assert response.body.include?('more fields than the file has headers')
+  end
+
+  test 'should not take a row with empty trailing cells for a ragged one' do
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n")
+    assert_response :success
+
+    assert_equal 0, assigns(:ragged_rows)
+    assert_not response.body.include?('more fields than the file has headers')
+  end
+
   # --- The column the rows are matched by -----------------------------------
 
   test 'should refuse a file the matching column is not in' do

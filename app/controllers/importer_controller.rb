@@ -385,6 +385,7 @@ class ImporterController < ApplicationController
 
       begin
         normalize_row(row)
+        count_ragged_row(row)
 
         issue = Issue.new
         issue.notify = false
@@ -598,6 +599,10 @@ class ImporterController < ApplicationController
 
   # The bookkeeping every run ends with, whatever it did to the issues
   def finalize_import(reset_ids: false)
+    if @ragged_rows.positive?
+      @messages << l(:warning_ragged_rows, count: @ragged_rows)
+    end
+
     unless @failed_issues.empty?
       @failed_issues = @failed_issues.sort
       @headers = @failed_issues[0][1].headers
@@ -630,6 +635,7 @@ class ImporterController < ApplicationController
       report_progress
 
       normalize_row(row)
+      count_ragged_row(row)
 
       begin
         issue = issue_for_unique_attr(unique_attr, row[unique_field], row)
@@ -696,6 +702,37 @@ class ImporterController < ApplicationController
   rescue StandardError => e
     log_failure(row, l(:warning_issue_delete_failed, issue_num: @failed_count + 1,
                                                      id: issue.id, message: e.message))
+  end
+
+  # A line carrying more fields than the file has headers. CSV lines the
+  # fields up with the headers by position, so everything past the extra
+  # separator sits one column to the left and the last value ends up under no
+  # header at all - reachable only as row[nil]. Every single value still looks
+  # plausible, so nothing further down notices; the count is reported once at
+  # the end of the run.
+  #
+  # The opposite, a line with too few fields, cannot be seen from here: CSV
+  # turns an empty unquoted field into nil, so a truncated line and a line
+  # with empty trailing cells are the same thing by the time it is parsed.
+  # What such a line does to the matching is caught by #matchable_row?
+  # instead.
+  def count_ragged_row(row)
+    return unless row.respond_to?(:headers)
+    return unless row.headers.include?(nil)
+
+    @ragged_rows += 1
+  end
+
+  # Whether the row says which issue it is about. An empty cell in the
+  # matching column, or a cell no identifier can be extracted from, does not:
+  # such a row cannot be found, and creating an issue from it would put a row
+  # into Redmine that no later import can reach again. A truncated line looks
+  # exactly like this.
+  def matchable_row?(row, unique_field)
+    raw_value = row[unique_field]
+    return false if raw_value.to_s.strip.blank?
+
+    extract_unique_value(raw_value).to_s.strip.present?
   end
 
   # The values of a row come from a file and may carry a broken encoding, so
@@ -917,6 +954,19 @@ class ImporterController < ApplicationController
 
   def handle_issue_update(issue, row, author, status, update_other_project, journal_field, unique_attr, unique_field, ignore_non_exist, update_issue)
     if update_issue
+      # The row has to say which issue it is about before the lookup is worth
+      # running. Without that it is neither an update nor a new issue: it is a
+      # row the file failed to describe.
+      unless matchable_row?(row, unique_field)
+        if ignore_non_exist
+          @skip_count += 1
+        else
+          log_failure(row, l(:warning_no_unique_value_to_match,
+                             issue_num: @failed_count + 1, column: unique_field))
+        end
+        raise RowFailed
+      end
+
       begin
         issue = issue_for_unique_attr(unique_attr, row[unique_field], row)
 
@@ -1150,6 +1200,8 @@ class ImporterController < ApplicationController
     @delete_mode = false
     # Whether an empty cell in a mapped column empties the field
     @clear_empty_cells = false
+    # Rows of the file carrying more fields than the file has headers
+    @ragged_rows = 0
     # Columns the clearing marker was met in but cannot be applied to
     @clear_marker_ignored = Set.new
     # Values of the private column that are neither the yes nor the no

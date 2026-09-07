@@ -95,6 +95,8 @@ en:
   warning_validation_errors: "Warning: The following data-validation errors occurred on issue %{issue_num} in the list below"
   warning_attr_error: "Error: %{attr} %{message}"
   warning_no_match_for_update: "Warning: Could not update issue %{issue_num} below, no match for the value %{value} was found"
+  warning_no_unique_value_to_match: "Warning: Row %{issue_num} below carries no value in the column '%{column}' the issues are matched by, so it says nothing about which issue it is about and was not imported. A truncated line of the file looks like this."
+  warning_ragged_rows: "Warning: %{count} row(s) of the file carry more fields than the file has headers. Everything past the extra separator was read one column to the left, so the values may have been put into the wrong fields. Check the file for an unquoted separator inside the text."
   warning_multiple_matches_for_update: "Warning: Could not update issue %{issue_num} below, multiple matches for the value %{value} were found"
   warning_parent_not_found: "Warning: When setting the parent for issue %{issue_num} below, no matches for the value %{value} were found"
   warning_parent_multiple_matches: "Warning: When setting the parent for issue %{issue_num} below, multiple matches for the value %{value} were found"
