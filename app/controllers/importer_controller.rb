@@ -275,6 +275,19 @@ class ImporterController < ApplicationController
     # matched by their id
     @unique_attr_is_issue_id = unique_attr == 'standard_field-id'
 
+    # The column the rows are matched by has to be in the file. It is named by
+    # the form, which builds its list from the headers of the file, so this
+    # only ever fires for a request that was not built by that form: a saved
+    # set of rules replayed against another file, a header that changed its
+    # spelling, a hand-made request. Left unchecked, every row would read an
+    # empty value, match nothing and - since the update is combined with the
+    # creation - import the whole file a second time without a word.
+    missing_column = missing_matching_column(iip, csv_options(iip), unique_field)
+    if missing_column
+      flash[:error] = l(:error_matching_column_not_in_file, column: missing_column)
+      return
+    end
+
     # validation!
     # Without a column carrying the unique values there is nothing to match the
     # rows against: no issue can be found, and none can be referred to from
@@ -343,10 +356,7 @@ class ImporterController < ApplicationController
     # if error is full, NOP
     return if flash[:error].present?
 
-    csv_opt = { headers: true,
-                encoding: 'UTF-8',
-                quote_char: iip.quote_char,
-                col_sep: iip.col_sep }
+    csv_opt = csv_options(iip)
 
     # the total is needed to report the progress as a percentage; the rows
     # were counted in the match step, so the file is parsed once more only
@@ -1583,6 +1593,41 @@ class ImporterController < ApplicationController
       deleted_count: @deleted_issue_ids.size,
       skipped_count: @skip_count.to_i,
       failed_count: @failed_count.to_i }
+  end
+
+  def csv_options(iip)
+    { headers: true,
+      encoding: 'UTF-8',
+      quote_char: iip.quote_char,
+      col_sep: iip.col_sep }
+  end
+
+  # The name of the column the rows are matched by when the file has no such
+  # header, nil when there is nothing to complain about. Only the header line
+  # is read.
+  #
+  # The columns that only carry the values of the fields are not checked: a
+  # column that is not in the file reads as an empty cell, and an empty cell
+  # leaves the field of the issue alone.
+  def missing_matching_column(iip, csv_opt, unique_field)
+    return nil if unique_field.blank?
+
+    headers = csv_headers(iip, csv_opt)
+    return nil if headers.empty?
+
+    headers.include?(unique_field) ? nil : unique_field
+  end
+
+  def csv_headers(iip, csv_opt)
+    row = CSV.new(iip.csv_data, **csv_opt).first
+    # the keys of fields_map went through the same normalisation
+    Array(row&.headers).map do |header|
+      header.is_a?(String) ? header.unpack('U*').pack('U*') : header
+    end
+  rescue StandardError => e
+    # A file that cannot be parsed at all is reported by the import itself
+    Rails.logger.warn "redmine_importer: cannot read the headers of the file (#{e.message})"
+    []
   end
 
   # Number of the data rows of the file, the header excluded

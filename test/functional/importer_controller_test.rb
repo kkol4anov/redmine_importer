@@ -1559,6 +1559,43 @@ class ImporterControllerTest < ActionController::TestCase
     assert response.body.include?('Unchanged: 1')
   end
 
+  # --- The column the rows are matched by -----------------------------------
+
+  test 'should refuse a file the matching column is not in' do
+    params = id_params("#{@issue.id},foobar,Critical,\n")
+             .merge(unique_field: 'Identifier')
+
+    assert_no_difference 'Issue.count' do
+      post :result, params: params
+    end
+    assert_response :success
+
+    assert flash[:error].present?
+    assert flash[:error].include?('Identifier')
+  end
+
+  test 'should refuse an import by ids whose id column is not in the file' do
+    params = id_params("#{@issue.id},foobar,Critical,\n")
+    params[:fields_map] = params[:fields_map].except('#')
+                                             .merge('Ticket' => 'standard_field-id')
+
+    assert_no_difference 'Issue.count' do
+      post :result, params: params
+    end
+    assert_response :success
+
+    assert flash[:error].present?
+    assert flash[:error].include?('Ticket')
+  end
+
+  test 'should import a file whose columns are all in place' do
+    post :result, params: id_params("#{@issue.id},renamed,Critical,\n")
+    assert_response :success
+
+    assert_nil flash[:error]
+    assert_equal 'renamed', @issue.reload.subject
+  end
+
   # --- Empty cells and the clearing marker ----------------------------------
 
   test 'should keep the stored value when a mapped cell is empty' do
