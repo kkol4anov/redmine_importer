@@ -17,8 +17,9 @@ Newer and older versions might work but these haven't been tested so far.
 
 To install:
 - Download the plugin to your 'plugins/' directory.  Be sure to maintain the correct folder name, 'redmine_importer'.
-- Run <code>rake redmine:plugins:migrate RAILS_ENV=production</code>
-- Restart your redmine as appropriate (e.g., <code>ruby script/rails server -e production</code>)
+- Run: <code>$ rake redmine:plugins:migrate RAILS_ENV=production</code>
+- Run: <code>$ rake tmp:cache:clear RAILS_ENV=production</code>
+- Restart your redmine: <code>$ touch tmp/restart.txt</code>
 - Go to the Admin/Projects/../Modules
 - Enable "Importer"
 

@@ -11,7 +11,8 @@ Redmine::Plugin.register :redmine_importer do
   name 'Issue Importer'
   author 'Martin Liu / Leo Hourvitz / Stoyan Zhekov / Jérôme Bataille / Agileware Inc. / Konstantin Kolchanov'
   description 'Issue import plugin for Redmine.'
-  version '2.1.13'
+  version '2.1.14'
+  url 'https://github.com/kkol4anov/redmine_importer'
 
   settings default: { 'max_csv_rows' => '5000' },
            partial: 'settings/redmine_importer_settings'
