@@ -1367,7 +1367,123 @@ class ImporterControllerTest < ActionController::TestCase
            'Expected the scope in the unresolved warning'
   end
 
+  test 'should record the issues the import has updated' do
+    @iip.update!(csv_data: "#,Subject\n#{@issue.id},updated by the import\n")
+    post :result, params: build_params(update_issue: 'true', use_issue_id: '1')
+    assert_response :success
+
+    assert_equal [], assigns(:created_issues)
+    assert_equal [[@issue.id, 'updated by the import']], assigns(:updated_issues)
+    assert response.body.include?("/issues/#{@issue.id}"),
+           'Expected a link to the updated issue'
+  end
+
+  test 'should record the issues the import has created' do
+    post :result, params: creation_params("first new issue\nsecond new issue\n")
+    assert_response :success
+
+    created = assigns(:created_issues)
+    assert_equal ['first new issue', 'second new issue'], created.map(&:last)
+    assert_equal [], assigns(:updated_issues)
+    created.each do |id, _subject|
+      assert response.body.include?("/issues/#{id}"),
+             "Expected a link to the created issue ##{id}"
+    end
+  end
+
+  test 'should report the progress of the import' do
+    post :result, params: creation_params("progress row\n")
+    assert_response :success
+
+    get :progress, params: { project_id: @project.id,
+                             import_timestamp: @import_timestamp }
+    assert_response :success
+
+    status = JSON.parse(response.body)
+    assert_equal ImportInProgress::STAGE_FINISHED, status['stage']
+    assert status['finished']
+    assert_equal 100, status['percent']
+    assert_equal 1, status['total_rows']
+    assert_equal 1, status['processed_rows']
+    assert_equal 1, status['created_count']
+    assert_equal 0, status['updated_count']
+  end
+
+  test 'should keep the row of the import as finished without its payload' do
+    post :result, params: creation_params("a row of a finished import\n")
+    assert_response :success
+
+    iip = ImportInProgress.find_by_user_id(@user.id)
+    assert iip, 'Expected the row of the import to outlive it'
+    assert iip.finished?
+    assert_equal ImportInProgress::STAGE_FINISHED, iip.stage
+    assert iip.csv_data.blank?, 'Expected the file to be dropped'
+
+    # the same form sent twice must not import the file a second time
+    assert_no_difference 'Issue.count' do
+      post :result, params: { import_timestamp: @import_timestamp,
+                              project_id: @project.id }
+    end
+    assert_equal I18n.t(:error_import_already_done), flash[:error]
+  end
+
+  test 'should keep the file of an import that failed' do
+    post :result, params: creation_params("a row of a failed import\n")
+                  .merge(import_timestamp: '1999-01-01 00:00:00')
+    assert_response :success
+    assert_equal I18n.t(:error_import_superseded), flash[:error]
+
+    iip = ImportInProgress.find_by_user_id(@user.id)
+    assert iip.csv_data.present?, 'Expected the file to be kept for a retry'
+  end
+
+  test 'should report an unknown progress when no import was started' do
+    ImportInProgress.delete_all
+
+    get :progress, params: { project_id: @project.id }
+    assert_response :success
+    assert_equal ImportInProgress::STAGE_UNKNOWN,
+                 JSON.parse(response.body)['stage']
+  end
+
+  test 'should report an unknown progress for another import of the user' do
+    post :result, params: creation_params("a row of the first import\n")
+    assert_response :success
+
+    get :progress, params: { project_id: @project.id,
+                             import_timestamp: '1970-01-01 00:00:00' }
+    assert_response :success
+    assert_equal ImportInProgress::STAGE_UNKNOWN,
+                 JSON.parse(response.body)['stage']
+  end
+
+  test 'should import when the progress cannot be reported' do
+    ImportInProgress.any_instance.stubs(:report!)
+                    .raises(ActiveRecord::StatementInvalid.new('no such column'))
+
+    post :result, params: creation_params("a row imported without progress\n")
+    assert_response :success
+    assert Issue.find_by(subject: 'a row imported without progress'),
+           'Expected the import to run without the progress reporting'
+  end
+
   protected
+
+  # An import of new issues: every line of +subjects+ becomes an issue
+  def creation_params(subjects)
+    @iip.update!(csv_data: "Subject,Tracker\n" +
+                           subjects.lines.map { |s| "#{s.chomp},#{@tracker.name}\n" }.join)
+    @import_timestamp = @iip.created.strftime('%Y-%m-%d %H:%M:%S')
+    {
+      import_timestamp: @import_timestamp,
+      project_id: @project.id,
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Tracker' => 'standard_field-tracker'
+      }
+    }
+  end
+
   def extraction_reference_params(csv_rows, opts = {})
     @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)
     @iip.csv_data = "Subject,Parent\n#{csv_rows}"
