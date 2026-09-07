@@ -51,6 +51,14 @@ class ImporterController < ApplicationController
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
 
+  # A cell holding this marker asks for the field to be emptied, whatever the
+  # issue holds. The marker itself is never written anywhere: it is turned
+  # into an empty value before the field is assigned.
+  CLEAR_VALUE_MARKER = '[CLEAR]'
+  # Fields the marker cannot empty. Redmine requires the first four, and the
+  # importer only ever adds to the watchers.
+  UNCLEARABLE_FIELDS = %i[subject tracker status priority watchers].freeze
+
   # Attributes of an issue that change by themselves and say nothing about
   # whether a row of the file has anything to write. They are left out when the
   # state of an issue is taken to be compared before and after the row.
@@ -209,6 +217,11 @@ class ImporterController < ApplicationController
     # issue is already in Redmine updates it, a row whose issue is not there
     # yet creates it. Turning ignore_non_exist on narrows this down to the
     # update alone, leaving the rows without a match untouched.
+    # An empty cell in a mapped column says nothing about the field and leaves
+    # what the issue holds alone. Turning this on brings the older behaviour
+    # back: an empty cell empties the field.
+    @clear_empty_cells = params[:clear_empty_cells].present? && !delete_issues
+
     update_issue = params[:update_issue].present? && !delete_issues
     update_other_project = params[:update_other_project]
     send_emails = params[:send_emails].present? && !delete_issues
@@ -951,25 +964,25 @@ class ImporterController < ApplicationController
 
   def assign_issue_attrs(issue, category, fixed_version_id, assigned_to, status, row, priority, tracker)
     # required attributes
-    if assignable?(:status)
+    if assignable?(:status, row)
       issue.status_id = !status.nil? ? status.id : issue.status_id
     end
-    if assignable?(:priority)
+    if assignable?(:priority, row)
       issue.priority_id = !priority.nil? ? priority.id : issue.priority_id
     end
-    if assignable?(:subject)
+    if assignable?(:subject, row)
       issue.subject = fetch('standard_field-subject', row) || issue.subject
     end
-    if assignable?(:tracker)
+    if assignable?(:tracker, row)
       issue.tracker_id = tracker.present? ? tracker.id : issue.tracker_id
     end
 
     # optional attributes
-    issue.description = fetch('standard_field-description', row) if assignable?(:description)
-    issue.category_id = category.try(:id) if assignable?(:category)
+    issue.description = fetch('standard_field-description', row) if assignable?(:description, row)
+    issue.category_id = category.try(:id) if assignable?(:category, row)
 
     %w[start_date due_date].each do |date_field_name|
-      next unless assignable?(date_field_name)
+      next unless assignable?(date_field_name, row)
 
       date_field_value = fetch("standard_field-#{date_field_name}", row)
 
@@ -985,19 +998,34 @@ class ImporterController < ApplicationController
       end
     end
 
-    if assignable?(:assigned_to)
+    if assignable?(:assigned_to, row)
       issue.assigned_to_id = assigned_to.try(:id)
       unless issue.assigned_to.in?(issue.assignable_users)
         issue.assigned_to = nil
       end
     end
-    issue.fixed_version_id = fixed_version_id if assignable?(:fixed_version)
-    issue.done_ratio = fetch('standard_field-done_ratio', row) if assignable?(:done_ratio)
-    if assignable?(:estimated_hours)
+    issue.fixed_version_id = fixed_version_id if assignable?(:fixed_version, row)
+    if assignable?(:done_ratio, row)
+      # An emptied progress is no progress: the column takes no NULL, and
+      # writing one over a 0 used to be the quiet way to break it.
+      issue.done_ratio = fetch('standard_field-done_ratio', row).presence || 0
+    end
+    if assignable?(:estimated_hours, row)
       issue.estimated_hours = fetch('standard_field-estimated_hours', row)
     end
-    if assignable?(:is_private)
-      issue.is_private = (convert_to_boolean(fetch('standard_field-is_private', row)) || false)
+    if assignable?(:is_private, row)
+      raw_private = fetch('standard_field-is_private', row)
+      private_value = convert_to_boolean(raw_private)
+
+      if private_value.nil? && raw_private.present?
+        # A word that is neither the yes nor the no of the locale is not a
+        # "no": the flag is left alone instead of being quietly taken off.
+        if @unrecognised_private.add?(raw_private)
+          @messages << l(:warning_is_private_not_recognised, value: raw_private)
+        end
+      else
+        issue.is_private = private_value || false
+      end
     end
   end
 
@@ -1015,14 +1043,58 @@ class ImporterController < ApplicationController
     columns_by_field.detect { |_field, columns| columns.size > 1 }
   end
 
-  def assignable?(field)
+  # Whether the row has anything to say about the given field.
+  #
+  # Without a row this is the plain question the mapping answers: is the field
+  # mapped to a column at all. With a row the cell is asked as well: an empty
+  # cell says nothing and leaves the field alone, unless the import was told
+  # that an empty cell empties the field.
+  def assignable?(field, row = nil)
     raise unless ISSUE_ATTRS.include?(field.to_sym)
+    return false unless @attrs_map.key?("standard_field-#{field}")
+    return true if row.nil?
 
-    @attrs_map.key?("standard_field-#{field}")
+    column = @attrs_map["standard_field-#{field}"]
+    raw_value = row[column]
+
+    if clear_marker?(raw_value) && UNCLEARABLE_FIELDS.include?(field.to_sym)
+      report_ignored_clear_marker(column)
+      return false
+    end
+
+    cell_writes?(raw_value)
+  end
+
+  # True when the cell asks for something to be written to the field
+  def cell_writes?(raw_value)
+    return true if clear_marker?(raw_value)
+
+    raw_value.to_s.strip.present? || @clear_empty_cells
+  end
+
+  def clear_marker?(raw_value)
+    raw_value.to_s.strip.casecmp(CLEAR_VALUE_MARKER).zero?
+  end
+
+  # Once per column: the marker in a column that cannot be emptied would
+  # otherwise be taken for an ordinary value or dropped without a word.
+  def report_ignored_clear_marker(column)
+    return unless @clear_marker_ignored.add?(column)
+
+    @messages << l(:warning_clear_marker_ignored, marker: CLEAR_VALUE_MARKER,
+                                                  column: column)
   end
 
   def handle_parent_issues(issue, row, ignore_non_exist, unique_attr, unique_field)
-    return unless assignable?(:parent_issue)
+    return unless assignable?(:parent_issue, row)
+
+    # The marker takes the parent off. An empty cell never did, and does not
+    # now even when empty cells empty the fields: dropping a parent is a move
+    # in the tree of the issues and is asked for on purpose.
+    if clear_marker?(row[@attrs_map['standard_field-parent_issue']])
+      issue.parent_issue_id = nil
+      return
+    end
 
     parent_value = fetch('standard_field-parent_issue', row)
     return unless parent_value.present?
@@ -1066,6 +1138,12 @@ class ImporterController < ApplicationController
     @failed_count = 0
     # Whether this run deletes the issues instead of importing them
     @delete_mode = false
+    # Whether an empty cell in a mapped column empties the field
+    @clear_empty_cells = false
+    # Columns the clearing marker was met in but cannot be applied to
+    @clear_marker_ignored = Set.new
+    # Values of the private column that are neither the yes nor the no
+    @unrecognised_private = Set.new
     # Set by the handlers that write outside of issue.save (the watchers), so
     # that such a row is not taken for one that changed nothing
     @row_touched_issue = false
@@ -1117,7 +1195,7 @@ class ImporterController < ApplicationController
   end
 
   def handle_watchers(issue, row, watchers)
-    return unless assignable?(:watchers)
+    return unless assignable?(:watchers, row)
 
     watcher_failed_count = 0
     if watchers
@@ -1151,7 +1229,12 @@ class ImporterController < ApplicationController
     issue.custom_field_values = issue.available_custom_fields.each_with_object({}) do |cf, h|
       next h unless @attrs_map.key?("custom_field-#{cf.name}") # this cf is absent or ignored.
 
-      value = row[@attrs_map["custom_field-#{cf.name}"]]
+      raw_value = row[@attrs_map["custom_field-#{cf.name}"]]
+      # a cell saying nothing about the field leaves the stored value alone:
+      # the key is left out of the hash, and acts_as_customizable keeps it
+      next h unless cell_writes?(raw_value)
+
+      value = clear_marker?(raw_value) ? nil : raw_value
       if cf.multiple
         h[cf.id] = process_multivalue_custom_field(project, add_versions, issue, cf, value)
       else
@@ -1337,8 +1420,11 @@ class ImporterController < ApplicationController
                                  column: column, scope: scope_description(row))
   end
 
+  # The value of the mapped cell, with the marker turned into an empty value
+  # so that it never reaches the issue, the journal or the database
   def fetch(key, row)
-    row[@attrs_map[key]]
+    value = row[@attrs_map[key]]
+    clear_marker?(value) ? nil : value
   end
 
   def log_failure(row, msg)

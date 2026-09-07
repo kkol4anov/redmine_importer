@@ -480,7 +480,7 @@ class ImporterControllerTest < ActionController::TestCase
     @tracker.custom_fields << start_date_field
     Issue.delete_all
     @iip.update!(csv_data: "#,Subject,Tracker,Status,Priority,StartDate\n1,Task with blank date,Defect,New,Critical,\n")
-    post :result, params: build_params.tap { |params|
+    post :result, params: build_params(clear_empty_cells: '1').tap { |params|
       params[:fields_map]['StartDate'] = 'custom_field-StartDate'
     }
     assert_response :success
@@ -1559,6 +1559,81 @@ class ImporterControllerTest < ActionController::TestCase
     assert response.body.include?('Unchanged: 1')
   end
 
+  # --- Empty cells and the clearing marker ----------------------------------
+
+  test 'should keep the stored value when a mapped cell is empty' do
+    @issue.update!(description: 'written by hand')
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical,\n")
+    assert_response :success
+
+    assert_equal 'written by hand', @issue.reload.description
+    assert_equal 1, assigns(:unchanged_count),
+                 'Expected a file saying nothing new to change nothing'
+  end
+
+  test 'should empty the field when a mapped cell is empty and asked to' do
+    @issue.update!(description: 'written by hand')
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical,\n",
+                                    clear_empty_cells: '1')
+    assert_response :success
+
+    assert_nil @issue.reload.description
+    assert_equal [@issue.id], assigns(:updated_issue_ids)
+  end
+
+  test 'should empty the field the clearing marker is put in' do
+    @issue.update!(description: 'written by hand')
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical,[CLEAR]\n")
+    assert_response :success
+
+    assert_nil @issue.reload.description
+    assert_equal [@issue.id], assigns(:updated_issue_ids)
+  end
+
+  test 'should never write the clearing marker itself' do
+    @issue.update!(description: 'written by hand')
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical,[clear]\n")
+    assert_response :success
+
+    @issue.reload
+    assert_nil @issue.description
+    detail = @issue.journals.last.details.detect { |d| d.prop_key == 'description' }
+    assert detail, 'Expected the emptying to be journalled'
+    assert detail.value.blank?, 'Expected the marker to stay out of the history'
+    assert_not response.body.downcase.include?('[clear]')
+  end
+
+  test 'should ignore the clearing marker in a column that cannot be emptied' do
+    post :result, params: id_params("#{@issue.id},[CLEAR],Critical,\n")
+    assert_response :success
+
+    assert_equal 'foobar', @issue.reload.subject
+    assert response.body.include?('cannot be emptied')
+  end
+
+  test 'should read an empty progress as no progress' do
+    @issue.update!(done_ratio: 40)
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical,[CLEAR]\n")
+             .tap { |p| p[:fields_map]['Description'] = 'standard_field-done_ratio' }
+    assert_response :success
+
+    assert_equal 0, @issue.reload.done_ratio
+  end
+
+  test 'should leave the private flag alone on a word it does not know' do
+    post :result, params: id_params("#{@issue.id},foobar,Critical,maybe\n")
+             .tap { |p| p[:fields_map]['Description'] = 'standard_field-is_private' }
+    assert_response :success
+
+    assert_equal false, @issue.reload.is_private
+    assert response.body.include?('neither yes nor no')
+  end
+
   # --- The deletion mode ----------------------------------------------------
 
   test 'should delete the issues the rows name' do
@@ -1638,7 +1713,7 @@ class ImporterControllerTest < ActionController::TestCase
   # subject and the priority, so that a row can be made to repeat exactly what
   # the issue already carries.
   def id_params(rows, opts = {})
-    crud_iip!("#,Subject,Priority\n#{rows}")
+    crud_iip!("#,Subject,Priority,Description\n#{rows}")
 
     {
       import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
@@ -1650,7 +1725,8 @@ class ImporterControllerTest < ActionController::TestCase
       fields_map: {
         '#' => 'standard_field-id',
         'Subject' => 'standard_field-subject',
-        'Priority' => 'standard_field-priority'
+        'Priority' => 'standard_field-priority',
+        'Description' => 'standard_field-description'
       }
     }.merge(opts)
   end
