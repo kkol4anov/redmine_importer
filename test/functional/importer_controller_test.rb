@@ -1476,7 +1476,214 @@ class ImporterControllerTest < ActionController::TestCase
            'Expected the import to run without the progress reporting'
   end
 
+  # --- The combined mode: update what is there, create the rest -------------
+
+  test 'should create the issue a row finds no match for' do
+    post :result, params: subject_params("no such issue,Critical,created by the import\n")
+    assert_response :success
+
+    issue = Issue.find_by(subject: 'no such issue')
+    assert issue, 'Expected the row without a match to create an issue'
+    assert_equal 'created by the import', issue.description
+    assert_equal [issue.id], assigns(:created_issue_ids)
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'should update the issue a row matches instead of creating one' do
+    issue = create_issue!(@project, @user, { subject: 'already there', tracker: @tracker })
+
+    assert_no_difference 'Issue.count' do
+      post :result, params: subject_params("already there,Critical,updated by the import\n")
+    end
+    assert_response :success
+
+    assert_equal 'updated by the import', issue.reload.description
+    assert_equal [issue.id], assigns(:updated_issue_ids)
+  end
+
+  test 'should skip a row without a match when non-existant issues are ignored' do
+    assert_no_difference 'Issue.count' do
+      post :result, params: subject_params("no such issue,Critical,created by the import\n",
+                                           ignore_non_exist: '1')
+    end
+    assert_response :success
+
+    assert_equal 1, assigns(:skip_count)
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'should import as new issues when no column carries the unique values' do
+    post :result, params: subject_params("nothing to match by,Critical,\n").except(:unique_field)
+    assert_response :success
+
+    assert_nil flash[:error]
+    assert Issue.find_by(subject: 'nothing to match by'),
+           'Expected the file to be imported as new issues'
+    assert response.body.include?('imported as new issues'),
+           'Expected the result to say the update was switched off'
+  end
+
+  # --- Only the issues a row changes are written ----------------------------
+
+  test 'should leave an issue a row changes nothing on untouched' do
+    updated_on = @issue.reload.updated_on
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n")
+    assert_response :success
+
+    assert_equal 1, assigns(:unchanged_count)
+    assert_equal [], assigns(:updated_issue_ids)
+    assert_equal updated_on.to_i, @issue.reload.updated_on.to_i
+    assert_equal 0, @issue.journals.count,
+                 'Expected no journal for an issue nothing was written to'
+  end
+
+  test 'should write the issues a row does change' do
+    post :result, params: id_params("#{@issue.id},changed by the import,Critical\n")
+    assert_response :success
+
+    assert_equal 0, assigns(:unchanged_count)
+    assert_equal [@issue.id], assigns(:updated_issue_ids)
+    assert_equal 'changed by the import', @issue.reload.subject
+  end
+
+  test 'should count the unchanged rows next to the changed ones' do
+    other = create_issue!(@project, @user, { subject: 'second', tracker: @tracker })
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n" \
+                                    "#{other.id},renamed,Critical\n")
+    assert_response :success
+
+    assert_equal 1, assigns(:unchanged_count)
+    assert_equal [other.id], assigns(:updated_issue_ids)
+    assert response.body.include?('Unchanged: 1')
+  end
+
+  # --- The deletion mode ----------------------------------------------------
+
+  test 'should delete the issues the rows name' do
+    other = create_issue!(@project, @user, { subject: 'to keep', tracker: @tracker })
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert_nil Issue.find_by(id: @issue.id)
+    assert Issue.exists?(other.id), 'Expected the issues no row names to be kept'
+    assert_equal [@issue.id], assigns(:deleted_issue_ids)
+    assert response.body.include?('Deleted: 1')
+  end
+
+  test 'should delete the subtasks along with the issue' do
+    child = create_issue!(@project, @user, { subject: 'child', parent_id: @issue.id })
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert_nil Issue.find_by(id: child.id)
+    assert_equal [@issue.id, child.id].sort, assigns(:deleted_issue_ids).sort
+  end
+
+  test 'should write nothing to the issues in the deletion mode' do
+    post :result, params: id_params("#{@issue.id},renamed by the import,Critical\n",
+                                    delete_issues: '1', update_issue: 'true')
+    assert_response :success
+
+    assert_nil Issue.find_by(id: @issue.id)
+    assert_equal [], assigns(:created_issue_ids)
+    assert_equal [], assigns(:updated_issue_ids)
+  end
+
+  test 'should report a row the deletion finds no issue for' do
+    post :result, params: id_params("999001,nothing,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert_equal 1, assigns(:failed_count)
+    assert response.body.include?('Could not delete issue')
+  end
+
+  test 'should skip a row the deletion finds no issue for when they are ignored' do
+    post :result, params: id_params("999001,nothing,Critical\n",
+                                    delete_issues: '1', ignore_non_exist: '1')
+    assert_response :success
+
+    assert_equal 1, assigns(:skip_count)
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'should refuse the deletion without a way to match the issues' do
+    params = id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+             .except(:use_issue_id, :unique_field)
+
+    post :result, params: params
+    assert_response :success
+
+    assert_equal I18n.t(:error_delete_requires_unique_field), flash[:error]
+    assert Issue.exists?(@issue.id), 'Expected nothing to be deleted'
+  end
+
+  test 'should not delete issues without the permission to delete them' do
+    @user.update!(admin: false)
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert Issue.exists?(@issue.id), 'Expected the issue to survive'
+    assert_equal 1, assigns(:failed_count)
+    assert response.body.include?('not allowed to delete issues')
+  end
+
   protected
+
+  # An import matching the issues by their own ids. The file holds the id, the
+  # subject and the priority, so that a row can be made to repeat exactly what
+  # the issue already carries.
+  def id_params(rows, opts = {})
+    crud_iip!("#,Subject,Priority\n#{rows}")
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: '#',
+      use_issue_id: '1',
+      update_issue: 'true',
+      default_tracker: @tracker.id,
+      fields_map: {
+        '#' => 'standard_field-id',
+        'Subject' => 'standard_field-subject',
+        'Priority' => 'standard_field-priority'
+      }
+    }.merge(opts)
+  end
+
+  # An import matching the issues by their subject, so that a row without a
+  # match has an issue to create
+  def subject_params(rows, opts = {})
+    crud_iip!("Subject,Priority,Description\n#{rows}")
+
+    {
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      project_id: @project.id,
+      unique_field: 'Subject',
+      update_issue: 'true',
+      default_tracker: @tracker.id,
+      fields_map: {
+        'Subject' => 'standard_field-subject',
+        'Priority' => 'standard_field-priority',
+        'Description' => 'standard_field-description'
+      }
+    }.merge(opts)
+  end
+
+  def crud_iip!(csv_data)
+    @iip = ImportInProgress.find_or_initialize_by(user_id: @user.id)
+    @iip.csv_data = csv_data
+    @iip.created = DateTime.now
+    @iip.encoding = 'UTF-8'
+    @iip.col_sep = ','
+    @iip.quote_char = '"'
+    @iip.save!
+    @iip
+  end
 
   # An import of new issues: every line of +subjects+ becomes an issue
   def creation_params(subjects)

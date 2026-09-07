@@ -10,14 +10,20 @@
 </p>
 
 <ul class="importer-result-summary">
-  <li>
-    <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
-    <%= imported_issues_link(@created_issue_ids) %>
-  </li>
-  <li>
-    <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
-    <%= imported_issues_link(@updated_issue_ids) %>
-  </li>
+  <% if @delete_mode %>
+    <%# The issues are gone, so there is nothing left to link to %>
+    <li><%= l(:label_result_deleted, :count => Array(@deleted_issue_ids).size) %></li>
+  <% else %>
+    <li>
+      <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
+      <%= imported_issues_link(@created_issue_ids) %>
+    </li>
+    <li>
+      <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
+      <%= imported_issues_link(@updated_issue_ids) %>
+    </li>
+    <li><%= l(:label_result_unchanged, :count => @unchanged_count.to_i) %></li>
+  <% end %>
   <li><%= l(:label_result_skipped, :count => @skip_count.to_i) %></li>
   <li><%= l(:label_result_errors, :count => @failed_count.to_i) %></li>
 </ul>

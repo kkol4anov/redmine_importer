@@ -51,6 +51,11 @@ class ImporterController < ApplicationController
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
 
+  # Attributes of an issue that change by themselves and say nothing about
+  # whether a row of the file has anything to write. They are left out when the
+  # state of an issue is taken to be compared before and after the row.
+  VOLATILE_ISSUE_ATTRS = %w[updated_on lock_version root_id lft rgt].freeze
+
   # Minimum delay between two writes of the progress of the import. The row is
   # written from the loop of the import, and once or twice a second is both
   # often enough for the bar to move smoothly and rare enough not to weigh on
@@ -192,11 +197,23 @@ class ImporterController < ApplicationController
 
     start_progress(iip)
     # which options were turned on?
-    update_issue = params[:update_issue]
+    #
+    # The deletion is a mode of its own: the rows name the issues to destroy
+    # and nothing is written to them, so the options that only apply to writing
+    # are switched off in the form and ignored here, whatever reaches the
+    # server.
+    delete_issues = params[:delete_issues].present?
+    @delete_mode = delete_issues
+
+    # The update is the default and is combined with the creation: a row whose
+    # issue is already in Redmine updates it, a row whose issue is not there
+    # yet creates it. Turning ignore_non_exist on narrows this down to the
+    # update alone, leaving the rows without a match untouched.
+    update_issue = params[:update_issue].present? && !delete_issues
     update_other_project = params[:update_other_project]
-    send_emails = params[:send_emails]
-    add_categories = params[:add_categories]
-    add_versions = params[:add_versions]
+    send_emails = params[:send_emails].present? && !delete_issues
+    add_categories = params[:add_categories].present? && !delete_issues
+    add_versions = params[:add_versions].present? && !delete_issues
     ignore_non_exist = params[:ignore_non_exist]
 
     # which fields should we use? what maps to what?
@@ -246,20 +263,38 @@ class ImporterController < ApplicationController
     @unique_attr_is_issue_id = unique_attr == 'standard_field-id'
 
     # validation!
-    # if the unique_attr is blank but any of the following opts is turned on,
+    # Without a column carrying the unique values there is nothing to match the
+    # rows against: no issue can be found, and none can be referred to from
+    # within the file.
     if unique_attr.blank?
+      # The update is on by default. With nothing to match by, the file can
+      # only be imported as new issues, which is what the form offers as well:
+      # the option is switched off there while no unique column is chosen. A
+      # request that still carries it is imported that way and says so, rather
+      # than being refused.
       if update_issue
-        flash[:error] = l(:text_rmi_specify_unique_field_for_update)
-      elsif @attrs_map['standard_field-parent_issue'].present?
+        update_issue = false
+        @messages << l(:warning_update_disabled_without_unique_field)
+      end
+
+      # The deletion, on the other hand, has nothing left to do at all
+      if delete_issues
+        flash[:error] = l(:error_delete_requires_unique_field)
+        return
+      end
+
+      if @attrs_map['standard_field-parent_issue'].present?
         flash[:error] = l(:text_rmi_specify_unique_field_for_column,
                           column: l(:field_parent_issue))
-      else IssueRelation::TYPES.each_key.any? { |t| @attrs_map["issue_relation-#{t}"].present? }
-           IssueRelation::TYPES.each_key do |t|
-             if @attrs_map["issue_relation-#{t}"].present?
-               flash[:error] = l(:text_rmi_specify_unique_field_for_column,
-                                 column: l("label_#{t}".to_sym))
-             end
-           end
+        return
+      end
+
+      IssueRelation::TYPES.each_key do |t|
+        next if @attrs_map["issue_relation-#{t}"].blank?
+
+        flash[:error] = l(:text_rmi_specify_unique_field_for_column,
+                          column: l("label_#{t}".to_sym))
+        return
       end
     end
 
@@ -305,22 +340,28 @@ class ImporterController < ApplicationController
     # when that count is missing
     @total_rows = iip.total_rows.to_i
     @total_rows = count_csv_rows(iip) if @total_rows <= 0
+    if delete_issues
+      report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
+      run_delete(iip, csv_opt, unique_attr, unique_field, ignore_non_exist,
+                 update_other_project)
+      report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
+      finalize_import
+      return
+    end
+
     report_progress(stage: ImportInProgress::STAGE_IMPORTING, force: true)
 
     CSV.new(iip.csv_data, **csv_opt).each do |row|
       @processed_rows += 1
       report_progress
+      # nothing has been written outside of issue.save for this row yet
+      @row_touched_issue = false
 
       project = project_by_name(fetch('standard_field-project', row))
       project ||= @project
 
       begin
-        row.each do |k, v|
-          k = k.unpack('U*').pack('U*') if k.is_a?(String)
-          v = v.unpack('U*').pack('U*') if v.is_a?(String)
-
-          row[k] = v
-        end
+        normalize_row(row)
 
         issue = Issue.new
         issue.notify = false
@@ -385,6 +426,11 @@ class ImporterController < ApplicationController
         issue, journal = handle_issue_update(issue, row, author, status, update_other_project, journal_field,
                                              unique_attr, unique_field, ignore_non_exist, update_issue)
 
+        # What the issue holds before the row is applied to it. Compared
+        # against the same reading afterwards to tell a row that changes
+        # something from a row that repeats what is already stored.
+        issue_state_before = issue.new_record? ? nil : issue_state(issue)
+
         project ||= Project.find_by_id(issue.project_id)
 
         update_project_issues_stat(project)
@@ -408,16 +454,24 @@ class ImporterController < ApplicationController
       # an issue found by the unique value is already in the database, every
       # other one is being created by this very row
       issue_created = issue.new_record?
+      # a row repeating what the issue already holds is not written at all:
+      # saving it would only move updated_on and leave an empty journal behind
+      issue_unchanged = issue_unchanged?(issue, issue_state_before)
 
-      begin
-        issue_saved = issue.save
-      rescue ActiveRecord::RecordNotUnique
-        issue_saved = false
-        @messages << l(:error_issue_id_taken)
+      if issue_unchanged
+        @unchanged_count += 1
+        issue_saved = true
+      else
+        begin
+          issue_saved = issue.save
+        rescue ActiveRecord::RecordNotUnique
+          issue_saved = false
+          @messages << l(:error_issue_id_taken)
+        end
       end
 
       if issue_saved
-        record_imported_issue(issue, issue_created)
+        record_imported_issue(issue, issue_created) unless issue_unchanged
 
         if unique_field
           row_key = unique_attr_cache_key(row[unique_field], row)
@@ -430,17 +484,19 @@ class ImporterController < ApplicationController
           end
         end
 
-        if send_emails
-          if update_issue
-            if Setting.notified_events.include?('issue_updated') \
-               && !(issue.current_journal.details.empty? && issue.current_journal.notes.blank?)
-
-              Mailer.deliver_issue_edit(issue.current_journal)
-            end
-          else
+        # An issue nothing was written to is not announced, and the row that
+        # created an issue is announced as a creation even when the import
+        # updates the issues it finds.
+        if send_emails && !issue_unchanged
+          if issue_created
             if Setting.notified_events.include?('issue_added')
               Mailer.deliver_issue_add(issue)
             end
+          elsif issue.current_journal \
+                && Setting.notified_events.include?('issue_updated') \
+                && !(issue.current_journal.details.empty? && issue.current_journal.notes.blank?)
+
+            Mailer.deliver_issue_edit(issue.current_journal)
           end
         end
 
@@ -512,6 +568,13 @@ class ImporterController < ApplicationController
     # Warn about any unresolved deferred references
     @deferred_callbacks.warn_unresolved
 
+    finalize_import(reset_ids: use_issue_id)
+  end
+  # only #result calls it, it is no action of its own
+  private :run_import
+
+  # The bookkeeping every run ends with, whatever it did to the issues
+  def finalize_import(reset_ids: false)
     unless @failed_issues.empty?
       @failed_issues = @failed_issues.sort
       @headers = @failed_issues[0][1].headers
@@ -523,14 +586,130 @@ class ImporterController < ApplicationController
     # Garbage prevention: clean up iips older than 3 days
     ImportInProgress.where('created < ?', Time.new - 3 * 24 * 60 * 60).delete_all
 
-    if use_issue_id && ActiveRecord::Base.connection.respond_to?(:reset_pk_sequence!)
+    if reset_ids && ActiveRecord::Base.connection.respond_to?(:reset_pk_sequence!)
       ActiveRecord::Base.connection.reset_pk_sequence!(Issue.table_name)
     end
 
     log_import_rate
   end
-  # only #result calls it, it is no action of its own
-  private :run_import
+
+  # The deletion mode. Every row names an issue and the issue is destroyed;
+  # nothing is created and nothing is written, so the columns that take no part
+  # in the matching are not read at all.
+  #
+  # Redmine deletes an issue together with its descendants, so a row naming a
+  # parent takes the whole subtree with it. The ids of the children are counted
+  # as deleted as well.
+  def run_delete(iip, csv_opt, unique_attr, unique_field, ignore_non_exist,
+                 delete_other_project)
+    CSV.new(iip.csv_data, **csv_opt).each do |row|
+      @processed_rows += 1
+      report_progress
+
+      normalize_row(row)
+
+      begin
+        issue = issue_for_unique_attr(unique_attr, row[unique_field], row)
+      rescue NoIssueForUniqueValue
+        # There is no such issue, which is the state the row asks for. Whether
+        # that is worth reporting is the same question the update answers with
+        # "ignore non-existant issues".
+        if ignore_non_exist
+          @skip_count += 1
+        else
+          log_failure(row,
+                      l(:warning_no_match_for_delete, issue_num: @failed_count + 1,
+                                                      value: "#{row[unique_field]}#{scope_description(row)}"))
+        end
+        next
+      rescue MultipleIssuesForUniqueValue => e
+        matches = e.issue_ids.present? ? " [#{e.issue_ids.map { |id| "##{id}" }.join(', ')}]" : ''
+        log_failure(row,
+                    l(:warning_multiple_matches_for_delete, issue_num: @failed_count + 1,
+                                                            value: "#{row[unique_field]}#{scope_description(row)}#{matches}"))
+        next
+      rescue ActiveRecord::RecordNotFound
+        log_failure(row, l(:warning_record_not_found, issue_num: @failed_count + 1,
+                                                      class_name: @unfound_class, key: @unfound_key))
+        next
+      rescue UnusableUniqueField => e
+        flash[:error] = e.message
+        return
+      end
+
+      # Reaching beyond the project of the import is guarded the same way the
+      # update guards it: an issue found by its id may live anywhere.
+      if issue.project_id != @project.id && !delete_other_project
+        @skip_count += 1
+        next
+      end
+
+      # The import permission alone does not allow destroying issues: the
+      # permission to delete them is required in the project of the issue.
+      unless User.current.allowed_to?(:delete_issues, issue.project)
+        log_failure(row, l(:warning_issue_not_deletable, issue_num: @failed_count + 1,
+                                                         id: issue.id))
+        next
+      end
+
+      delete_issue(issue, row)
+    end
+  end
+
+  def delete_issue(issue, row)
+    project = issue.project
+    ids = [issue.id]
+    ids += issue.descendants.pluck(:id) if issue.respond_to?(:descendants)
+
+    if issue.destroy
+      @deleted_issue_ids.concat(ids.compact.uniq)
+      update_project_issues_stat(project) if project
+      @handle_count += 1
+    else
+      log_failure(row, l(:warning_issue_delete_failed, issue_num: @failed_count + 1,
+                                                       id: issue.id,
+                                                       message: issue.errors.full_messages.join(', ')))
+    end
+  rescue StandardError => e
+    log_failure(row, l(:warning_issue_delete_failed, issue_num: @failed_count + 1,
+                                                     id: issue.id, message: e.message))
+  end
+
+  # The values of a row come from a file and may carry a broken encoding, so
+  # every one of them is put through this before it is read.
+  def normalize_row(row)
+    row.each do |k, v|
+      k = k.unpack('U*').pack('U*') if k.is_a?(String)
+      v = v.unpack('U*').pack('U*') if v.is_a?(String)
+
+      row[k] = v
+    end
+    row
+  end
+
+  # True when the row leaves the issue exactly as it is: none of the fields it
+  # maps differ from what is stored, it adds no note and it attached no
+  # watcher. Such a row is not saved at all.
+  #
+  # A new issue is never "unchanged": the row is what brings it into being.
+  def issue_unchanged?(issue, state_before)
+    return false if state_before.nil?
+    return false if @row_touched_issue
+    return false if issue.current_journal&.notes.present?
+
+    state_before == issue_state(issue)
+  end
+
+  # Everything a row may change on an existing issue, read into one comparable
+  # value. The custom values are copied out right away: the assignment that
+  # follows writes into the very same objects.
+  def issue_state(issue)
+    [issue.attributes.except(*VOLATILE_ISSUE_ATTRS),
+     issue.parent_issue_id.to_s,
+     issue.custom_field_values.map do |value|
+       [value.custom_field_id, Array(value.value).map(&:to_s).sort]
+     end.sort]
+  end
 
   def translate_unique_attr(unique_field, unique_attr)
     # "custom_field-<name>" -> "cf_<id>", "standard_field-<attr>" -> filter name
@@ -739,15 +918,18 @@ class ImporterController < ApplicationController
         journal.notify = false # disable journal's notification to use custom one down below
         @update_count += 1
       rescue NoIssueForUniqueValue
+        # The combined mode: there is no such issue yet, so the row creates it.
+        # The issue built by the caller is untouched by the failed lookup and
+        # carries the project, the tracker and the author already.
+        #
+        # "Ignore non-existant issues" narrows the run down to the update
+        # alone: such a row is then left alone instead.
         if ignore_non_exist
           @skip_count += 1
           raise RowFailed
-        else
-          log_failure(row,
-                      l(:warning_no_match_for_update, issue_num: @failed_count + 1,
-                                                      value: "#{row[unique_field]}#{scope_description(row)}"))
-          raise RowFailed
         end
+
+        journal = nil
       rescue MultipleIssuesForUniqueValue => e
         matches = e.issue_ids.present? ? " [#{e.issue_ids.map { |id| "##{id}" }.join(', ')}]" : ''
         log_failure(row,
@@ -879,7 +1061,14 @@ class ImporterController < ApplicationController
     @handle_count = 0
     @update_count = 0
     @skip_count = 0
+    # Rows that named an existing issue and had nothing to write to it
+    @unchanged_count = 0
     @failed_count = 0
+    # Whether this run deletes the issues instead of importing them
+    @delete_mode = false
+    # Set by the handlers that write outside of issue.save (the watchers), so
+    # that such a row is not taken for one that changed nothing
+    @row_touched_issue = false
     @failed_issues = {}
     @messages = []
     @affect_projects_issues = {}
@@ -890,6 +1079,9 @@ class ImporterController < ApplicationController
     # the result page
     @created_issue_ids = []
     @updated_issue_ids = []
+    # Ids of the issues the deletion mode destroyed, the descendants that went
+    # with them included
+    @deleted_issue_ids = []
     # Custom fields narrowing the scope of the unique values matching
     @unique_scope_fields = []
     # Whether the unique column is mapped to the issue id
@@ -937,6 +1129,9 @@ class ImporterController < ApplicationController
 
           if addable_watcher_users.include?(watcher_user)
             issue.add_watcher(watcher_user)
+            # attaching a watcher to an issue already in the database writes
+            # right away, outside of the save below
+            @row_touched_issue = true
           end
         rescue ActiveRecord::RecordNotFound
           if watcher_failed_count == 0
@@ -1216,7 +1411,8 @@ class ImporterController < ApplicationController
     Rails.logger.info(
       "redmine_importer: #{@processed_rows} rows in #{elapsed.round(1)}s " \
       "(#{rate} rows/s), created #{@created_issue_ids.size}, " \
-      "updated #{@updated_issue_ids.size}, skipped #{@skip_count}, " \
+      "updated #{@updated_issue_ids.size}, unchanged #{@unchanged_count}, " \
+      "deleted #{@deleted_issue_ids.size}, skipped #{@skip_count}, " \
       "failed #{@failed_count}"
     )
   rescue StandardError => e
@@ -1235,6 +1431,7 @@ class ImporterController < ApplicationController
     @progress_written_at = Time.now
     @progress.report!(stage: ImportInProgress::STAGE_PREPARING,
                       processed_rows: 0, created_count: 0, updated_count: 0,
+                      unchanged_count: 0, deleted_count: 0,
                       skipped_count: 0, failed_count: 0, finished_at: nil)
   rescue StandardError => e
     Rails.logger.warn "redmine_importer: cannot report the progress of the import (#{e.message})"
@@ -1296,6 +1493,8 @@ class ImporterController < ApplicationController
       processed_rows: @processed_rows.to_i,
       created_count: @created_issue_ids.size,
       updated_count: @updated_issue_ids.size,
+      unchanged_count: @unchanged_count.to_i,
+      deleted_count: @deleted_issue_ids.size,
       skipped_count: @skip_count.to_i,
       failed_count: @failed_count.to_i }
   end

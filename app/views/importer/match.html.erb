@@ -2,18 +2,6 @@
   <%= stylesheet_link_tag 'importer', :plugin => 'redmine_importer' %>
 <% end %>
 
-<% content_for :update_issue_javascript do %>
-  <script type='text/javascript'>
-    $(function() {
-      $('#update_issue').change(function() {
-        $('#journal_field').attr('disabled', !this.checked)
-        $('#update_other_project').attr('disabled', !this.checked)
-        $('#ignore_non_exist').attr('disabled', !this.checked)
-      }).change();
-    })
-  </script>
-<% end %>
-
 <h2><%= l(:label_match_columns) %></h2>
 
 <%# The import runs inside the request started by the form below, which stays
@@ -26,6 +14,7 @@
                                     :import_timestamp => @import_timestamp) %>"
      data-stage-labels="<%= { 'preparing'  => l(:label_import_stage_preparing),
                               'importing'  => l(:label_import_stage_importing),
+                              'deleting'   => l(:label_import_stage_deleting),
                               'finalizing' => l(:label_import_stage_finalizing),
                               'finished'   => l(:label_import_stage_finished),
                               'failed'     => l(:label_import_stage_failed) }.to_json %>">
@@ -38,8 +27,10 @@
   </div>
 
   <p class="importer-progress-counters">
-    <span><%= l(:label_import_progress_created) %> <span id="import-progress-created">0</span></span>
-    <span><%= l(:label_import_progress_updated) %> <span id="import-progress-updated">0</span></span>
+    <span class="importer-progress-write"><%= l(:label_import_progress_created) %> <span id="import-progress-created">0</span></span>
+    <span class="importer-progress-write"><%= l(:label_import_progress_updated) %> <span id="import-progress-updated">0</span></span>
+    <span class="importer-progress-write"><%= l(:label_import_progress_unchanged) %> <span id="import-progress-unchanged">0</span></span>
+    <span class="importer-progress-delete" style="display: none;"><%= l(:label_import_progress_deleted) %> <span id="import-progress-deleted">0</span></span>
     <span><%= l(:label_import_progress_skipped) %> <span id="import-progress-skipped">0</span></span>
     <span><%= l(:label_import_progress_failed) %> <span id="import-progress-failed">0</span></span>
   </p>
@@ -68,7 +59,21 @@
 
   <fieldset class="box">
     <legend><%= l(:label_import_rule) %></legend>
-    
+
+    <%# A mode of its own: the rows name the issues to destroy and nothing is
+        written to them, so every option that only applies to writing is
+        switched off below while it is on. %>
+    <div id="delete_issues_wrapper">
+      <label>
+        <%= check_box_tag "delete_issues", true, false %>
+        <%= l(:label_delete_issues) %>
+      </label>
+      <%= importer_hint(l(:label_delete_issues_info)) %>
+      <span id="delete_issues_warning" class="importer-warning" style="display: none;">
+        <%= l(:warning_delete_without_unique_field) %>
+      </span>
+    </div>
+
     <label>
       <%= check_box_tag "use_issue_id", true, false %>
       <%= l(:label_importer_use_issue_id) %>
@@ -152,57 +157,74 @@
       </span>
     </div>
 
-    <label>
-      <%= check_box_tag "send_emails", true, false %>
-      <%= l(:label_importer_send_emails) %>
-    </label>
-    <br/>
-    <label>
-      <%= check_box_tag "add_categories", true, false %>
-      <%= l(:label_importer_add_categories) %>
-    </label>
-    <br/>
-    <label>
-      <%= check_box_tag "add_versions", true, false %>
-      <%= l(:label_importer_add_versions) %>
-    </label>
-    <br/>
+    <%# Options that only apply to writing the issues: unused by the deletion %>
+    <div id="write_options">
+      <label>
+        <%= check_box_tag "send_emails", true, false %>
+        <%= l(:label_importer_send_emails) %>
+      </label>
+      <br/>
+      <label>
+        <%= check_box_tag "add_categories", true, false %>
+        <%= l(:label_importer_add_categories) %>
+      </label>
+      <br/>
+      <label>
+        <%= check_box_tag "add_versions", true, false %>
+        <%= l(:label_importer_add_versions) %>
+      </label>
+      <br/>
+    </div>
+
     <label>
       <%= check_box_tag "use_anonymous", true, false %>
       <%= l(:label_importer_use_anonymous) %>
     </label>
     <br/>
-    <label>
-      <%= check_box_tag "update_issue", true, false %>
-      <%= l(:label_update_issue) %>
-    </label>
-    <br/>
 
-    <%= yield :update_issue_javascript %>
+    <%# The update is the default: a row whose issue is already there updates
+        it, a row whose issue is not there creates it. Without a column
+        carrying the unique values there is nothing to match by, and the
+        option is switched off - the server does the same. %>
+    <div id="update_issue_wrapper">
+      <label>
+        <%= check_box_tag "update_issue", true, true %>
+        <%= l(:label_update_issue) %>
+      </label>
+      <%= importer_hint(l(:label_update_issue_info)) %>
+    </div>
 
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <label>
-      <%= l(:label_journal_field) %>
-      <%= select_tag "journal_field",
-        raw("<option value=\"\">#{l(:option_ignore)}</option>") +
-        options_for_select(@headers.map{|header| force_utf8(header)}),
-        {:disabled => true} %>
-    </label>
-    <br/>
+    <div id="journal_field_wrapper">
+      &nbsp;&nbsp;&nbsp;&nbsp;
+      <label>
+        <%= l(:label_journal_field) %>
+        <%= select_tag "journal_field",
+          raw("<option value=\"\">#{l(:option_ignore)}</option>") +
+          options_for_select(@headers.map{|header| force_utf8(header)}),
+          {:disabled => true} %>
+      </label>
+      <br/>
+    </div>
 
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <label>
-      <%= check_box_tag "update_other_project", true, false, {:disabled => true} %>
-      <%= l(:label_update_other_project) %>
-    </label>
-    <br/>
+    <%# Both the update and the deletion look the issues up, so both may reach
+        an issue of another project and both may meet a row nothing matches %>
+    <div id="match_options">
+      &nbsp;&nbsp;&nbsp;&nbsp;
+      <label>
+        <%= check_box_tag "update_other_project", true, false, {:disabled => true} %>
+        <%= l(:label_update_other_project) %>
+      </label>
+      <%= importer_hint(l(:label_update_other_project_info)) %>
+      <br/>
 
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <label>
-      <%= check_box_tag "ignore_non_exist", true, false, {:disabled => true} %>
-      <%= l(:label_ignore_non_exist) %>
-    </label>
-    <br/>
+      &nbsp;&nbsp;&nbsp;&nbsp;
+      <label>
+        <%= check_box_tag "ignore_non_exist", true, false, {:disabled => true} %>
+        <%= l(:label_ignore_non_exist) %>
+      </label>
+      <%= importer_hint(l(:label_ignore_non_exist_info)) %>
+      <br/>
+    </div>
   </fieldset>
 
   <%= submit_tag l(:button_redmine_importer_submit), :id => 'import-button' %>
@@ -235,6 +257,49 @@
 
     function importByIssueId() {
       return $('#use_issue_id').is(':checked');
+    }
+
+    function deleteMode() {
+      return $('#delete_issues').is(':checked');
+    }
+
+    // Matching an existing issue needs something to match it by: either the
+    // import goes by the ids of the issues, or a column carrying the unique
+    // values is chosen.
+    function uniqueMatchingAvailable() {
+      return importByIssueId() || !!$('#unique_field').val();
+    }
+
+    // Switches off the controls the current mode does not use. They stay
+    // visible, so that the configuration underneath keeps reading the way it
+    // was left; disabled controls are not submitted, and the server ignores
+    // their values anyway.
+    function toggleModes() {
+      var deleting = deleteMode();
+      var matching = uniqueMatchingAvailable();
+
+      // nothing is written to the issues while they are being deleted
+      $('#write_options').toggleClass('importer-disabled', deleting);
+      $('#send_emails, #add_categories, #add_versions').prop('disabled', deleting);
+
+      // no unique values, nothing to look the issues up by: everything the
+      // file holds can only be imported as new issues
+      var canUpdate = matching && !deleting;
+      $('#update_issue').prop('disabled', !canUpdate);
+      $('#update_issue_wrapper').toggleClass('importer-disabled', !canUpdate);
+
+      var updating = canUpdate && $('#update_issue').is(':checked');
+      $('#journal_field').prop('disabled', !updating);
+      $('#journal_field_wrapper').toggleClass('importer-disabled', !updating);
+
+      // the update and the deletion both look the issues up
+      var lookingUp = updating || (deleting && matching);
+      $('#update_other_project, #ignore_non_exist').prop('disabled', !lookingUp);
+      $('#match_options').toggleClass('importer-disabled', !lookingUp);
+
+      // the deletion has nothing to work on without the unique values, and
+      // the server refuses such a file
+      $('#delete_issues_warning').toggle(deleting && !matching);
     }
 
     // The import by ids needs a column mapped to the id: the ids are read
@@ -299,9 +364,10 @@
     function refreshImportRules() {
       toggleIdColumnWarning();
       toggleUniqueMatching();
+      toggleModes();
     }
 
-    $('#use_issue_id, #unique_field, #extract_unique_value')
+    $('#use_issue_id, #unique_field, #extract_unique_value, #update_issue, #delete_issues')
       .add(fieldsMapSelects())
       .on('change', refreshImportRules);
     refreshImportRules();
@@ -337,6 +403,8 @@
       $('#progress-label').text(status.processed_rows + ' / ' + total);
       $('#import-progress-created').text(status.created_count);
       $('#import-progress-updated').text(status.updated_count);
+      $('#import-progress-unchanged').text(status.unchanged_count);
+      $('#import-progress-deleted').text(status.deleted_count);
       $('#import-progress-skipped').text(status.skipped_count);
       $('#import-progress-failed').text(status.failed_count);
 
@@ -367,6 +435,11 @@
     // import runs, and the result page then loads as a normal page. The
     // polling stops by itself when the browser leaves for it.
     function watchProgress() {
+      // the deletion fills a counter of its own and none of the others
+      var deleting = deleteMode();
+      $('.importer-progress-write').toggle(!deleting);
+      $('.importer-progress-delete').toggle(deleting);
+
       $('#map_form, #csv-preview').hide();
       progressPanel.show();
       if (hasProgressbar) { progressBar.progressbar({value: false}); }

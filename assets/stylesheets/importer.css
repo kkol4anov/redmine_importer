@@ -159,3 +159,8 @@ display: inline-block;
 }
 
 .importer-result-summary li a { margin-left: 4px; }
+
+/* Deletion mode: a switch that turns the writing options off below it */
+#delete_issues_wrapper,
+#update_issue_wrapper,
+#journal_field_wrapper { margin: 6px 0; }

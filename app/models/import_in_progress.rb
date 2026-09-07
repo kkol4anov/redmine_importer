@@ -5,6 +5,8 @@ class ImportInProgress < ActiveRecord::Base
   STAGE_PREPARING = 'preparing'
   # The rows are being imported, processed_rows out of total_rows are done
   STAGE_IMPORTING = 'importing'
+  # The rows are being deleted, processed_rows out of total_rows are done
+  STAGE_DELETING = 'deleting'
   # The rows are over, the references that could not be resolved right away
   # are being finished off
   STAGE_FINALIZING = 'finalizing'
@@ -67,6 +69,8 @@ class ImportInProgress < ActiveRecord::Base
       processed_rows: processed_rows.to_i,
       created_count: created_count.to_i,
       updated_count: updated_count.to_i,
+      unchanged_count: unchanged_count.to_i,
+      deleted_count: deleted_count.to_i,
       skipped_count: skipped_count.to_i,
       failed_count: failed_count.to_i
     }
