@@ -16,6 +16,39 @@
 
 <h2><%= l(:label_match_columns) %></h2>
 
+<%# The import runs inside the request started by the form below, which stays
+    open until the whole file has been processed. The panel takes the place of
+    the form while that request is in flight and shows how far the import has
+    got, by polling the state the server writes into its row along the way. %>
+<div id="import-progress-panel" style="display: none;"
+     data-progress-url="<%= url_for(:controller => 'importer', :action => 'progress',
+                                    :project_id => @project.id,
+                                    :import_timestamp => @import_timestamp) %>"
+     data-stage-labels="<%= { 'preparing'  => l(:label_import_stage_preparing),
+                              'importing'  => l(:label_import_stage_importing),
+                              'finalizing' => l(:label_import_stage_finalizing),
+                              'finished'   => l(:label_import_stage_finished),
+                              'failed'     => l(:label_import_stage_failed) }.to_json %>">
+  <h3 id="import-progress-stage"><%= l(:label_import_stage_preparing) %></h3>
+
+  <%# Same markup as the progress of the import built into Redmine, so that it
+      is the same widget with the same look. %>
+  <div id="import-details">
+    <div id="import-progress"><div id="progress-label">0 / 0</div></div>
+  </div>
+
+  <p class="importer-progress-counters">
+    <span><%= l(:label_import_progress_created) %> <span id="import-progress-created">0</span></span>
+    <span><%= l(:label_import_progress_updated) %> <span id="import-progress-updated">0</span></span>
+    <span><%= l(:label_import_progress_skipped) %> <span id="import-progress-skipped">0</span></span>
+    <span><%= l(:label_import_progress_failed) %> <span id="import-progress-failed">0</span></span>
+  </p>
+
+  <p class="importer-progress-note"><%= l(:text_import_progress_note) %></p>
+  <p class="importer-progress-note importer-progress-stalled"
+     id="import-progress-stalled" style="display: none;"><%= l(:text_import_progress_unavailable) %></p>
+</div>
+
 <%= form_tag({:action => 'result'}, {:multipart => true, :id => 'map_form'}) do %>
   <%= hidden_field_tag 'project_id', @project.id %>
   <%= hidden_field_tag 'import_timestamp', @import_timestamp %>
@@ -273,12 +306,103 @@
       .on('change', refreshImportRules);
     refreshImportRules();
 
+    // ------------------------------------------------------------------
+    // Progress of the import
+    // ------------------------------------------------------------------
+    var progressPanel = $('#import-progress-panel');
+    var progressBar = $('#import-progress');
+    var hasProgressbar = typeof $.fn.progressbar === 'function';
+
+    function stageLabel(stage) {
+      var labels = progressPanel.data('stage-labels') || {};
+      return labels[stage] || labels['importing'] || '';
+    }
+
+    // The rows of the file have not been counted yet, or the state cannot be
+    // read at all: the widget then runs its indeterminate animation instead of
+    // claiming a position it does not know.
+    function setBar(value, max) {
+      if (!hasProgressbar) { return; }
+      if (value === false) {
+        progressBar.progressbar('option', 'value', false);
+      } else {
+        progressBar.progressbar('option', {max: Math.max(1, max), value: value});
+      }
+    }
+
+    function renderProgress(status) {
+      var total = status.total_rows > 0 ? status.total_rows : 0;
+
+      $('#import-progress-stage').text(stageLabel(status.stage));
+      $('#progress-label').text(status.processed_rows + ' / ' + total);
+      $('#import-progress-created').text(status.created_count);
+      $('#import-progress-updated').text(status.updated_count);
+      $('#import-progress-skipped').text(status.skipped_count);
+      $('#import-progress-failed').text(status.failed_count);
+
+      if (!status.finished && total === 0) {
+        setBar(false);
+      } else {
+        setBar(status.processed_rows, total);
+      }
+    }
+
+    // The state cannot always be read while the import is running: a server
+    // serving a single request at a time answers the polls only after the
+    // import is over. The bar then says that the import goes on without
+    // saying how far it is, instead of standing still at zero.
+    function progressUnavailable() {
+      setBar(false);
+      $('#import-progress-stalled').show();
+    }
+
+    // The state is being read again: the note about the unreadable progress
+    // goes away, the bar is set by renderProgress below.
+    function progressAvailable() {
+      $('#import-progress-stalled').hide();
+    }
+
+    // The form is submitted the ordinary way. The browser keeps this page
+    // alive until the answer arrives, so the panel goes on polling while the
+    // import runs, and the result page then loads as a normal page. The
+    // polling stops by itself when the browser leaves for it.
+    function watchProgress() {
+      $('#map_form, #csv-preview').hide();
+      progressPanel.show();
+      if (hasProgressbar) { progressBar.progressbar({value: false}); }
+
+      var misses = 0;
+      setInterval(function() {
+        $.ajax({url: progressPanel.data('progress-url'),
+                dataType: 'json',
+                cache: false,
+                // no global ajax events: they would flash the "loading" box of
+                // Redmine over the page on every poll
+                global: false})
+          .done(function(status) {
+            if (status && status.stage && status.stage !== 'unknown') {
+              misses = 0;
+              progressAvailable();
+              renderProgress(status);
+            } else if (++misses >= 5) {
+              progressUnavailable();
+            }
+          })
+          .fail(function() {
+            if (++misses >= 5) { progressUnavailable(); }
+          });
+      }, 1000);
+    }
+
     $('#map_form').on('submit', function() {
       $('#import-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});
+      if (progressPanel.length) { watchProgress(); }
+      return true;
     });
   });
 </script>
 
+<div id="csv-preview">
 <hr/>
 
 <%= l(:label_toplines, @original_filename) %>
@@ -304,3 +428,4 @@
     </tr>
   </tbody>
 </table>
+</div>

@@ -9,6 +9,19 @@
   :success_count => @handle_count) %>
 </p>
 
+<ul class="importer-result-summary">
+  <li>
+    <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
+    <%= imported_issues_link(@created_issue_ids) %>
+  </li>
+  <li>
+    <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
+    <%= imported_issues_link(@updated_issue_ids) %>
+  </li>
+  <li><%= l(:label_result_skipped, :count => @skip_count.to_i) %></li>
+  <li><%= l(:label_result_errors, :count => @failed_count.to_i) %></li>
+</ul>
+
 <p><%= l(:label_result_projects) %>
   <br/>
   <% @affect_projects_issues.each do |project, count|%>
@@ -54,5 +67,3 @@
     </tbody>
   </table>
 <% end %>
-
-

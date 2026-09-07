@@ -51,6 +51,16 @@ class ImporterController < ApplicationController
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
 
+  # Minimum delay between two writes of the progress of the import. The row is
+  # written from the loop of the import, and once or twice a second is both
+  # often enough for the bar to move smoothly and rare enough not to weigh on
+  # the import itself.
+  PROGRESS_UPDATE_INTERVAL = 0.5
+  # The result page links to the imported issues by putting their ids into the
+  # address of the issue list. Above this many ids the address grows past what
+  # servers accept, and the link falls back to the range the ids span.
+  RESULT_ISSUE_LIST_LINK_LIMIT = 500
+
   def index; end
 
   def match
@@ -131,7 +141,32 @@ class ImporterController < ApplicationController
     end
   end
 
+  # The import runs inside this request, as it always did; the progress of it
+  # is reported into the database along the way and is polled by the browser
+  # from the #progress action below.
   def result
+    run_import
+    finish_progress
+  rescue StandardError
+    finish_progress(failed: true)
+    raise
+  end
+
+  # The state of the import the browser is waiting for, polled while the
+  # request performing it is still running.
+  def progress
+    iip = begin
+      ImportInProgress.current_for(User.current, params[:import_timestamp])
+    rescue StandardError => e
+      Rails.logger.warn "redmine_importer: cannot read the progress of the import (#{e.message})"
+      nil
+    end
+
+    expires_now
+    render json: iip ? iip.as_status : { stage: ImportInProgress::STAGE_UNKNOWN }
+  end
+
+  def run_import
     # used for bookkeeping
     flash.delete(:error)
 
@@ -143,10 +178,19 @@ class ImporterController < ApplicationController
       flash[:error] = l(:error_no_import_in_progress)
       return
     end
-    if iip.created.strftime('%Y-%m-%d %H:%M:%S') != params[:import_timestamp]
+    if iip.timestamp != params[:import_timestamp]
       flash[:error] = l(:error_import_superseded)
       return
     end
+    # The row outlives the import it describes, so that the page waiting for
+    # it can read the final state. Sending the same form a second time (the
+    # back button, a double click) must not import the file again.
+    if iip.finished?
+      flash[:error] = l(:error_import_already_done)
+      return
+    end
+
+    start_progress(iip)
     # which options were turned on?
     update_issue = params[:update_issue]
     update_other_project = params[:update_other_project]
@@ -255,8 +299,19 @@ class ImporterController < ApplicationController
                 encoding: 'UTF-8',
                 quote_char: iip.quote_char,
                 col_sep: iip.col_sep }
+
+    # the total is needed to report the progress as a percentage; the rows
+    # were counted in the match step, so the file is parsed once more only
+    # when that count is missing
+    @total_rows = iip.total_rows.to_i
+    @total_rows = count_csv_rows(iip) if @total_rows <= 0
+    report_progress(stage: ImportInProgress::STAGE_IMPORTING, force: true)
+
     CSV.new(iip.csv_data, **csv_opt).each do |row|
-      project = Project.find_by_name(fetch('standard_field-project', row))
+      @processed_rows += 1
+      report_progress
+
+      project = project_by_name(fetch('standard_field-project', row))
       project ||= @project
 
       begin
@@ -272,17 +327,16 @@ class ImporterController < ApplicationController
 
         issue.id = fetch('standard_field-id', row) if use_issue_id
 
-        tracker = Tracker.find_by_name(fetch('standard_field-tracker', row))
-        status = IssueStatus.find_by_name(fetch('standard_field-status', row))
+        tracker = tracker_by_name(fetch('standard_field-tracker', row))
+        status = status_by_name(fetch('standard_field-status', row))
         author = if @attrs_map.key?('standard_field-author') && @attrs_map['standard_field-author']
                    user_for_login!(fetch('standard_field-author', row))
                  else
                    User.current
                  end
-        priority = Enumeration.find_by_name(fetch('standard_field-priority', row))
+        priority = priority_by_name(fetch('standard_field-priority', row))
         category_name = fetch('standard_field-category', row)
-        category = IssueCategory.find_by_project_id_and_name(project.id,
-                                                             category_name)
+        category = category_by_name(project, category_name)
 
         if !category \
           && category_name && !category_name.empty? \
@@ -290,6 +344,7 @@ class ImporterController < ApplicationController
 
           category = project.issue_categories.build(name: category_name)
           category.save
+          remember_category(project, category)
         end
 
         if category.blank? && fetch('standard_field-category', row).present?
@@ -350,6 +405,10 @@ class ImporterController < ApplicationController
 
       issue.singleton_class.include RedmineImporter::Concerns::ValidateStatus
 
+      # an issue found by the unique value is already in the database, every
+      # other one is being created by this very row
+      issue_created = issue.new_record?
+
       begin
         issue_saved = issue.save
       rescue ActiveRecord::RecordNotUnique
@@ -358,6 +417,8 @@ class ImporterController < ApplicationController
       end
 
       if issue_saved
+        record_imported_issue(issue, issue_created)
+
         if unique_field
           row_key = unique_attr_cache_key(row[unique_field], row)
           if row_key
@@ -446,6 +507,8 @@ class ImporterController < ApplicationController
       end
     end # do
 
+    report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
+
     # Warn about any unresolved deferred references
     @deferred_callbacks.warn_unresolved
 
@@ -454,8 +517,8 @@ class ImporterController < ApplicationController
       @headers = @failed_issues[0][1].headers
     end
 
-    # Clean up after ourselves
-    iip.delete
+    # The row of this import is marked finished and loses its payload once the
+    # result is ready, in #finish_progress.
 
     # Garbage prevention: clean up iips older than 3 days
     ImportInProgress.where('created < ?', Time.new - 3 * 24 * 60 * 60).delete_all
@@ -463,7 +526,11 @@ class ImporterController < ApplicationController
     if use_issue_id && ActiveRecord::Base.connection.respond_to?(:reset_pk_sequence!)
       ActiveRecord::Base.connection.reset_pk_sequence!(Issue.table_name)
     end
+
+    log_import_rate
   end
+  # only #result calls it, it is no action of its own
+  private :run_import
 
   def translate_unique_attr(unique_field, unique_attr)
     # "custom_field-<name>" -> "cf_<id>", "standard_field-<attr>" -> filter name
@@ -816,6 +883,13 @@ class ImporterController < ApplicationController
     @failed_issues = {}
     @messages = []
     @affect_projects_issues = {}
+    # Progress of the import: the rows of the file and the issues they gave
+    @total_rows = 0
+    @processed_rows = 0
+    # Ids of every issue the import has created and updated, linked to from
+    # the result page
+    @created_issue_ids = []
+    @updated_issue_ids = []
     # Custom fields narrowing the scope of the unique values matching
     @unique_scope_fields = []
     # Whether the unique column is mapped to the issue id
@@ -834,6 +908,15 @@ class ImporterController < ApplicationController
     @version_id_by_name = {}
     # Cache of CustomFieldEnumeration by name
     @enumeration_id_by_name = {}
+    # Caches of the objects every row looks up by name. The tables behind them
+    # are small and never change during an import, but the lookups are
+    # repeated once per row, and the query cache of ActiveRecord is of no help
+    # here because the import writes between them.
+    @project_by_name = {}
+    @tracker_by_name = {}
+    @status_by_name = {}
+    @priority_by_name = {}
+    @category_by_project_and_name = {}
     # Deferred callbacks for resolving forward references in CSV
     @deferred_callbacks = RedmineImporter::DeferredCallbacks.new(
       issue_cache: @issue_by_unique_attr,
@@ -1069,6 +1152,169 @@ class ImporterController < ApplicationController
     @messages << msg
   end
 
+  def record_imported_issue(issue, created)
+    if created
+      @created_issue_ids << issue.id
+    else
+      @updated_issue_ids << issue.id
+    end
+  end
+
+  # The lookups below stand in for the find_by_name calls the loop used to make
+  # on every row. A blank name never reaches the database at all: the old calls
+  # asked for a row with a NULL name, which is a query answering nil.
+  def project_by_name(name)
+    return nil if name.blank?
+
+    @project_by_name.fetch(name) { @project_by_name[name] = Project.find_by_name(name) }
+  end
+
+  def tracker_by_name(name)
+    return nil if name.blank?
+
+    @tracker_by_name.fetch(name) { @tracker_by_name[name] = Tracker.find_by_name(name) }
+  end
+
+  def status_by_name(name)
+    return nil if name.blank?
+
+    @status_by_name.fetch(name) { @status_by_name[name] = IssueStatus.find_by_name(name) }
+  end
+
+  def priority_by_name(name)
+    return nil if name.blank?
+
+    @priority_by_name.fetch(name) { @priority_by_name[name] = Enumeration.find_by_name(name) }
+  end
+
+  def category_by_name(project, name)
+    return nil if project.nil? || name.blank?
+
+    key = [project.id, name]
+    @category_by_project_and_name.fetch(key) do
+      @category_by_project_and_name[key] =
+        IssueCategory.find_by_project_id_and_name(project.id, name)
+    end
+  end
+
+  # A category the import has just created is put into the cache, so that the
+  # rows that follow find it instead of building it a second time
+  def remember_category(project, category)
+    return if project.nil? || category.nil? || category.new_record?
+
+    @category_by_project_and_name[[project.id, category.name]] = category
+  end
+
+  # One line in the log telling how long the import took and how fast it went,
+  # so that a slow run can be compared against the timeout of the frontend
+  # without instrumenting anything by hand
+  def log_import_rate
+    return if @import_started_at.nil?
+
+    elapsed = Time.now - @import_started_at
+    rate = elapsed > 0 ? (@processed_rows / elapsed).round(1) : 0
+    Rails.logger.info(
+      "redmine_importer: #{@processed_rows} rows in #{elapsed.round(1)}s " \
+      "(#{rate} rows/s), created #{@created_issue_ids.size}, " \
+      "updated #{@updated_issue_ids.size}, skipped #{@skip_count}, " \
+      "failed #{@failed_count}"
+    )
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot log the rate of the import (#{e.message})"
+  end
+
+  # Starts reporting the progress. The import must run even when the progress
+  # cannot be tracked at all (the table of the plugin is missing because its
+  # migrations have not been run yet, the database is read-only for this
+  # connection, and so on), so any failure here only switches the reporting
+  # off: the browser then falls back to an indeterminate bar.
+  def start_progress(iip)
+    @iip = iip
+    @progress = iip
+    @import_started_at = Time.now
+    @progress_written_at = Time.now
+    @progress.report!(stage: ImportInProgress::STAGE_PREPARING,
+                      processed_rows: 0, created_count: 0, updated_count: 0,
+                      skipped_count: 0, failed_count: 0, finished_at: nil)
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot report the progress of the import (#{e.message})"
+    @progress = nil
+  end
+
+  # Writes the counters into the row of the progress, at most once every
+  # PROGRESS_UPDATE_INTERVAL seconds unless a stage is being switched.
+  def report_progress(stage: nil, force: false)
+    return if @progress.nil?
+
+    now = Time.now
+    return if !force && stage.nil? && (now - @progress_written_at) < PROGRESS_UPDATE_INTERVAL
+
+    @progress_written_at = now
+    @progress.report!(progress_attributes(stage: stage))
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot report the progress of the import (#{e.message})"
+    @progress = nil
+  end
+
+  # Marks the import over, so that the page waiting for it can tell that the
+  # result is on its way.
+  #
+  # The row used to be deleted here. It now stays, holding the final state,
+  # and only loses the file it carried; the next import of the user drops it,
+  # as does the cleanup of the rows older than three days. A file that was not
+  # imported keeps its payload, so that the import can be retried.
+  def finish_progress(failed: false)
+    return if @iip.nil? || @progress_finished
+
+    @progress_finished = true
+    broken = failed || flash[:error].present?
+
+    if @progress.nil?
+      # Nothing could be written along the way either: behave exactly as the
+      # import did before the progress was reported at all.
+      @iip.delete unless broken
+      return
+    end
+
+    stage = broken ? ImportInProgress::STAGE_FAILED : ImportInProgress::STAGE_FINISHED
+    attributes = progress_attributes(stage: stage).merge(finished_at: Time.now)
+    attributes[:csv_data] = nil unless broken
+    @progress.report!(attributes)
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot report the end of the import (#{e.message})"
+    @progress = nil
+    begin
+      @iip.delete unless broken
+    rescue StandardError
+      nil
+    end
+  end
+
+  def progress_attributes(stage: nil)
+    { stage: stage || @progress.stage,
+      total_rows: @total_rows.to_i,
+      processed_rows: @processed_rows.to_i,
+      created_count: @created_issue_ids.size,
+      updated_count: @updated_issue_ids.size,
+      skipped_count: @skip_count.to_i,
+      failed_count: @failed_count.to_i }
+  end
+
+  # Number of the data rows of the file, the header excluded
+  def count_csv_rows(iip)
+    count = 0
+    begin
+      CSV.new(iip.csv_data, headers: true,
+                            encoding: 'UTF-8',
+                            quote_char: iip.quote_char,
+                            col_sep: iip.col_sep).each { count += 1 }
+    rescue StandardError
+      # If CSV parsing fails, fall back to line counting
+      count = iip.csv_data.lines.to_a.size - 1
+    end
+    count
+  end
+
   def find_project
     @project = Project.find(params[:project_id])
   end
@@ -1112,24 +1358,24 @@ class ImporterController < ApplicationController
     max_rows = 5000 if max_rows <= 0 # Default fallback
 
     # Count actual data rows using CSV parser (excluding header)
-    row_count = 0
-    begin
-      CSV.new(iip.csv_data, headers: true,
-                           encoding: 'UTF-8',
-                           quote_char: iip.quote_char,
-                           col_sep: iip.col_sep).each do
-        row_count += 1
-      end
-    rescue StandardError => e
-      # If CSV parsing fails, fall back to line counting
-      row_count = iip.csv_data.lines.to_a.size - 1
-    end
+    row_count = count_csv_rows(iip)
 
     if row_count > max_rows
       flash[:error] = I18n.t(:error_csv_row_limit_exceeded,
                             max_rows: max_rows,
                             actual_rows: row_count)
       redirect_to project_importer_path(project_id: @project)
+      return
+    end
+
+    # The import reports its progress as a share of this number and would
+    # otherwise have to parse the file a second time to learn it. A failure
+    # here (the columns of the progress are missing because the migrations of
+    # the plugin have not been run) must not stop the import.
+    begin
+      iip.update_columns(total_rows: row_count) if iip.persisted?
+    rescue StandardError => e
+      Rails.logger.warn "redmine_importer: cannot store the number of rows (#{e.message})"
     end
   end
 
@@ -1211,9 +1457,9 @@ class ImporterController < ApplicationController
     else
       query = build_unique_query(unique_attr, '=', attr_value, row_data)
 
+      # No eager loading here: this runs once per row, and preloading seven
+      # associations costs seven queries for data the update rarely reads.
       issues = Issue.joins([:project])
-                    .includes(%i[assigned_to status tracker project priority
-                                 category fixed_version])
                     .limit(2)
                     .where(query.statement)
     end
