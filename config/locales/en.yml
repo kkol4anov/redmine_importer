@@ -102,6 +102,8 @@ en:
   warning_parent_multiple_matches: "Warning: When setting the parent for issue %{issue_num} below, multiple matches for the value %{value} were found"
   warning_no_match_for_delete: "Warning: Could not delete issue %{issue_num} below, no match for the value %{value} was found"
   warning_multiple_matches_for_delete: "Warning: Could not delete issue %{issue_num} below, multiple matches for the value %{value} were found"
+  warning_unnamed_subtasks_deleted: "Warning: %{count} issue(s) were deleted as subtasks of the issues the file names, without being named by it themselves. Redmine deletes an issue together with everything under it."
+  warning_duplicate_delete_rows: "Warning: %{count} row(s) name an issue another row already names and were skipped."
   warning_issue_not_deletable: "Warning: Issue %{issue_num} below (#%{id}) was not deleted: you are not allowed to delete issues in its project"
   warning_issue_delete_failed: "Warning: Issue %{issue_num} below (#%{id}) could not be deleted: %{message}"
   warning_clear_marker_ignored: "Warning: the %{marker} marker was met in the column '%{column}', which cannot be emptied, and was ignored"
@@ -112,6 +114,7 @@ en:
 
   label_import_stage_preparing: "Preparing the import…"
   label_import_stage_importing: "Importing the issues…"
+  label_import_stage_matching: "Looking the issues up…"
   label_import_stage_deleting: "Deleting the issues…"
   label_import_stage_finalizing: "Resolving the references between the issues…"
   label_import_stage_finished: "The import is over, loading the result…"

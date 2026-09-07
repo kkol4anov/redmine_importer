@@ -628,8 +628,36 @@ class ImporterController < ApplicationController
   # Redmine deletes an issue together with its descendants, so a row naming a
   # parent takes the whole subtree with it. The ids of the children are counted
   # as deleted as well.
+  # The deletion runs in two passes.
+  #
+  # Redmine destroys an issue together with everything hanging under it. Done
+  # row by row, a single row naming a parent takes hundreds of issues with it,
+  # and every other row of the file then finds nothing left and is reported as
+  # a missing issue - while the file in fact named those issues itself and
+  # they were duly deleted. The counters end up saying "deleted 742, skipped
+  # 740" about a file of 742 rows, and the whole subtree goes in one call, so
+  # the progress bar stands still through it.
+  #
+  # So the rows are first all turned into the issues they name, while every
+  # one of them is still there, and only then are the issues destroyed, the
+  # children before their parents. One row is then one issue, the progress
+  # moves row by row, and whatever is still taken along by a cascade is an
+  # issue no row named - which is worth saying out loud.
   def run_delete(iip, csv_opt, unique_attr, unique_field, ignore_non_exist,
                  delete_other_project)
+    targets = resolve_delete_targets(iip, csv_opt, unique_attr, unique_field,
+                                     ignore_non_exist, delete_other_project)
+    # a file that cannot be read at all is reported without anything destroyed
+    return if flash[:error].present?
+
+    destroy_delete_targets(targets)
+  end
+
+  def resolve_delete_targets(iip, csv_opt, unique_attr, unique_field,
+                             ignore_non_exist, delete_other_project)
+    report_progress(stage: ImportInProgress::STAGE_MATCHING, force: true)
+    rows_by_id = {}
+
     CSV.new(iip.csv_data, **csv_opt).each do |row|
       @processed_rows += 1
       report_progress
@@ -663,7 +691,7 @@ class ImporterController < ApplicationController
         next
       rescue UnusableUniqueField => e
         flash[:error] = e.message
-        return
+        return []
       end
 
       # Reaching beyond the project of the import is guarded the same way the
@@ -681,17 +709,78 @@ class ImporterController < ApplicationController
         next
       end
 
+      # two rows naming the same issue: the second one asks for what the first
+      # one already asks for
+      if rows_by_id.key?(issue.id)
+        @duplicate_rows += 1
+        @skip_count += 1
+        next
+      end
+
+      rows_by_id[issue.id] = row
+    end
+
+    order_leaves_first(rows_by_id.keys).map { |id| [id, rows_by_id[id]] }
+  end
+
+  # Puts every child before the issue it hangs under, so that a parent is
+  # never destroyed while a row still names one of its children. In the nested
+  # set of Redmine a child always carries a larger lft than its parent, so
+  # walking lft backwards within each tree is enough.
+  def order_leaves_first(ids)
+    return ids if ids.size < 2
+
+    ordered = Issue.where(id: ids).order(root_id: :asc, lft: :desc).pluck(:id)
+    # anything the ordering query did not see keeps its place, at the end
+    ordered + (ids - ordered)
+  end
+
+  def destroy_delete_targets(targets)
+    # the second pass counts issues, not rows: the bar starts over
+    @total_rows = targets.size
+    @processed_rows = 0
+    report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
+
+    targets.each do |id, row|
+      @processed_rows += 1
+      report_progress
+
+      issue = Issue.find_by_id(id)
+      if issue.nil?
+        # gone between the two passes - not by this run, the children go first
+        @skip_count += 1
+        next
+      end
+
       delete_issue(issue, row)
     end
+
+    report_delete_messages
+  end
+
+  def report_delete_messages
+    if @unnamed_deleted_ids.any?
+      @messages << l(:warning_unnamed_subtasks_deleted, count: @unnamed_deleted_ids.size)
+    end
+
+    return unless @duplicate_rows.positive?
+
+    @messages << l(:warning_duplicate_delete_rows, count: @duplicate_rows)
   end
 
   def delete_issue(issue, row)
     project = issue.project
-    ids = [issue.id]
-    ids += issue.descendants.pluck(:id) if issue.respond_to?(:descendants)
+    # With the children of the file destroyed first, whatever still hangs
+    # under this issue is a subtask no row named. It goes with the issue all
+    # the same - Redmine leaves no orphans - and that is worth reporting.
+    descendants = issue.respond_to?(:descendants) ? issue.descendants.pluck(:id).compact : []
 
     if issue.destroy
-      @deleted_issue_ids.concat(ids.compact.uniq)
+      @deleted_issue_ids << issue.id
+      unless descendants.empty?
+        @unnamed_deleted_ids.concat(descendants)
+        @deleted_issue_ids.concat(descendants)
+      end
       update_project_issues_stat(project) if project
       @handle_count += 1
     else
@@ -1222,6 +1311,10 @@ class ImporterController < ApplicationController
     # Ids of the issues the deletion mode destroyed, the descendants that went
     # with them included
     @deleted_issue_ids = []
+    # Of those, the ones no row of the file named: subtasks of a named issue
+    @unnamed_deleted_ids = []
+    # Rows naming an issue an earlier row already named
+    @duplicate_rows = 0
     # Custom fields narrowing the scope of the unique values matching
     @unique_scope_fields = []
     # Whether the unique column is mapped to the issue id

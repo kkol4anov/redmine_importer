@@ -5,7 +5,11 @@ class ImportInProgress < ActiveRecord::Base
   STAGE_PREPARING = 'preparing'
   # The rows are being imported, processed_rows out of total_rows are done
   STAGE_IMPORTING = 'importing'
-  # The rows are being deleted, processed_rows out of total_rows are done
+  # The rows are being turned into the issues they name, before anything is
+  # destroyed, processed_rows out of total_rows are done
+  STAGE_MATCHING = 'matching'
+  # The issues are being deleted, processed_rows out of total_rows are done.
+  # Here a row of the progress is an issue, not a row of the file.
   STAGE_DELETING = 'deleting'
   # The rows are over, the references that could not be resolved right away
   # are being finished off

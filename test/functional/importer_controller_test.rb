@@ -1754,6 +1754,63 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal [@issue.id, child.id].sort, assigns(:deleted_issue_ids).sort
   end
 
+  test 'should say which issues were deleted without being named' do
+    create_issue!(@project, @user, { subject: 'child', parent_id: @issue.id })
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert_equal 1, assigns(:unnamed_deleted_ids).size
+    assert response.body.include?('as subtasks of the issues the file names')
+  end
+
+  test 'should delete a whole named subtree row by row' do
+    parent = create_issue!(@project, @user, { subject: 'parent', tracker: @tracker })
+    child = create_issue!(@project, @user, { subject: 'child', parent_id: parent.id })
+    grandchild = create_issue!(@project, @user, { subject: 'grandchild', parent_id: child.id })
+
+    # the parent comes first in the file, exactly as an export would put it
+    post :result, params: id_params("#{parent.id},parent,Critical\n" \
+                                    "#{child.id},child,Critical\n" \
+                                    "#{grandchild.id},grandchild,Critical\n",
+                                    delete_issues: '1')
+    assert_response :success
+
+    assert_equal 3, assigns(:deleted_issue_ids).size
+    assert_equal 0, assigns(:skip_count),
+                 'Expected no row to find its issue already taken by another row'
+    assert_equal 0, assigns(:failed_count)
+    assert_equal [], assigns(:unnamed_deleted_ids),
+                 'Expected nothing to be deleted that the file did not name'
+    assert_nil Issue.find_by(id: parent.id)
+    assert_nil Issue.find_by(id: grandchild.id)
+  end
+
+  test 'should skip a row naming an issue another row already names' do
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n" \
+                                    "#{@issue.id},foobar,Critical\n",
+                                    delete_issues: '1')
+    assert_response :success
+
+    assert_equal 1, assigns(:deleted_issue_ids).size
+    assert_equal 1, assigns(:duplicate_rows)
+    assert_equal 0, assigns(:failed_count)
+    assert response.body.include?('already names')
+  end
+
+  test 'should destroy nothing when the file cannot be matched at all' do
+    child = create_issue!(@project, @user, { subject: 'child', parent_id: @issue.id })
+
+    ImporterController.any_instance.stubs(:issue_for_unique_attr)
+                      .raises(UnusableUniqueField.new('broken'))
+
+    post :result, params: id_params("#{@issue.id},foobar,Critical\n", delete_issues: '1')
+    assert_response :success
+
+    assert Issue.exists?(@issue.id), 'Expected the first pass to destroy nothing'
+    assert Issue.exists?(child.id)
+  end
+
   test 'should write nothing to the issues in the deletion mode' do
     post :result, params: id_params("#{@issue.id},renamed by the import,Critical\n",
                                     delete_issues: '1', update_issue: 'true')
