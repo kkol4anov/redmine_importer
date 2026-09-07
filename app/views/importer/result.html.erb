@@ -10,21 +10,17 @@
 </p>
 
 <ul class="importer-result-summary">
-  <li><%= l(:label_result_created, :count => Array(@created_issues).size) %></li>
-  <li><%= l(:label_result_updated, :count => Array(@updated_issues).size) %></li>
+  <li>
+    <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
+    <%= imported_issues_link(@created_issue_ids) %>
+  </li>
+  <li>
+    <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
+    <%= imported_issues_link(@updated_issue_ids) %>
+  </li>
   <li><%= l(:label_result_skipped, :count => @skip_count.to_i) %></li>
   <li><%= l(:label_result_errors, :count => @failed_count.to_i) %></li>
 </ul>
-
-<%= render :partial => 'imported_issues',
-           :locals => { :title => l(:label_result_created_issues,
-                                    :count => Array(@created_issues).size),
-                        :issues => Array(@created_issues) } %>
-
-<%= render :partial => 'imported_issues',
-           :locals => { :title => l(:label_result_updated_issues,
-                                    :count => Array(@updated_issues).size),
-                        :issues => Array(@updated_issues) } %>
 
 <p><%= l(:label_result_projects) %>
   <br/>

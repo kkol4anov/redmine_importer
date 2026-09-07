@@ -56,12 +56,10 @@ class ImporterController < ApplicationController
   # often enough for the bar to move smoothly and rare enough not to weigh on
   # the import itself.
   PROGRESS_UPDATE_INTERVAL = 0.5
-  # Max number of issue links printed on the result page in each of the two
-  # lists (the created and the updated issues)
-  RESULT_ISSUES_LIMIT = 200
-  # The "open them all in the issue list" link passes the ids in the address,
-  # so it is only offered while they fit into it
-  RESULT_ISSUE_LIST_LINK_LIMIT = 200
+  # The result page links to the imported issues by putting their ids into the
+  # address of the issue list. Above this many ids the address grows past what
+  # servers accept, and the link falls back to the range the ids span.
+  RESULT_ISSUE_LIST_LINK_LIMIT = 500
 
   def index; end
 
@@ -313,7 +311,7 @@ class ImporterController < ApplicationController
       @processed_rows += 1
       report_progress
 
-      project = Project.find_by_name(fetch('standard_field-project', row))
+      project = project_by_name(fetch('standard_field-project', row))
       project ||= @project
 
       begin
@@ -329,17 +327,16 @@ class ImporterController < ApplicationController
 
         issue.id = fetch('standard_field-id', row) if use_issue_id
 
-        tracker = Tracker.find_by_name(fetch('standard_field-tracker', row))
-        status = IssueStatus.find_by_name(fetch('standard_field-status', row))
+        tracker = tracker_by_name(fetch('standard_field-tracker', row))
+        status = status_by_name(fetch('standard_field-status', row))
         author = if @attrs_map.key?('standard_field-author') && @attrs_map['standard_field-author']
                    user_for_login!(fetch('standard_field-author', row))
                  else
                    User.current
                  end
-        priority = Enumeration.find_by_name(fetch('standard_field-priority', row))
+        priority = priority_by_name(fetch('standard_field-priority', row))
         category_name = fetch('standard_field-category', row)
-        category = IssueCategory.find_by_project_id_and_name(project.id,
-                                                             category_name)
+        category = category_by_name(project, category_name)
 
         if !category \
           && category_name && !category_name.empty? \
@@ -347,6 +344,7 @@ class ImporterController < ApplicationController
 
           category = project.issue_categories.build(name: category_name)
           category.save
+          remember_category(project, category)
         end
 
         if category.blank? && fetch('standard_field-category', row).present?
@@ -528,6 +526,8 @@ class ImporterController < ApplicationController
     if use_issue_id && ActiveRecord::Base.connection.respond_to?(:reset_pk_sequence!)
       ActiveRecord::Base.connection.reset_pk_sequence!(Issue.table_name)
     end
+
+    log_import_rate
   end
   # only #result calls it, it is no action of its own
   private :run_import
@@ -886,10 +886,10 @@ class ImporterController < ApplicationController
     # Progress of the import: the rows of the file and the issues they gave
     @total_rows = 0
     @processed_rows = 0
-    # [id, subject] of every issue the import has created and updated, printed
-    # as links on the result page
-    @created_issues = []
-    @updated_issues = []
+    # Ids of every issue the import has created and updated, linked to from
+    # the result page
+    @created_issue_ids = []
+    @updated_issue_ids = []
     # Custom fields narrowing the scope of the unique values matching
     @unique_scope_fields = []
     # Whether the unique column is mapped to the issue id
@@ -908,6 +908,15 @@ class ImporterController < ApplicationController
     @version_id_by_name = {}
     # Cache of CustomFieldEnumeration by name
     @enumeration_id_by_name = {}
+    # Caches of the objects every row looks up by name. The tables behind them
+    # are small and never change during an import, but the lookups are
+    # repeated once per row, and the query cache of ActiveRecord is of no help
+    # here because the import writes between them.
+    @project_by_name = {}
+    @tracker_by_name = {}
+    @status_by_name = {}
+    @priority_by_name = {}
+    @category_by_project_and_name = {}
     # Deferred callbacks for resolving forward references in CSV
     @deferred_callbacks = RedmineImporter::DeferredCallbacks.new(
       issue_cache: @issue_by_unique_attr,
@@ -1144,12 +1153,74 @@ class ImporterController < ApplicationController
   end
 
   def record_imported_issue(issue, created)
-    entry = [issue.id, issue.subject.to_s]
     if created
-      @created_issues << entry
+      @created_issue_ids << issue.id
     else
-      @updated_issues << entry
+      @updated_issue_ids << issue.id
     end
+  end
+
+  # The lookups below stand in for the find_by_name calls the loop used to make
+  # on every row. A blank name never reaches the database at all: the old calls
+  # asked for a row with a NULL name, which is a query answering nil.
+  def project_by_name(name)
+    return nil if name.blank?
+
+    @project_by_name.fetch(name) { @project_by_name[name] = Project.find_by_name(name) }
+  end
+
+  def tracker_by_name(name)
+    return nil if name.blank?
+
+    @tracker_by_name.fetch(name) { @tracker_by_name[name] = Tracker.find_by_name(name) }
+  end
+
+  def status_by_name(name)
+    return nil if name.blank?
+
+    @status_by_name.fetch(name) { @status_by_name[name] = IssueStatus.find_by_name(name) }
+  end
+
+  def priority_by_name(name)
+    return nil if name.blank?
+
+    @priority_by_name.fetch(name) { @priority_by_name[name] = Enumeration.find_by_name(name) }
+  end
+
+  def category_by_name(project, name)
+    return nil if project.nil? || name.blank?
+
+    key = [project.id, name]
+    @category_by_project_and_name.fetch(key) do
+      @category_by_project_and_name[key] =
+        IssueCategory.find_by_project_id_and_name(project.id, name)
+    end
+  end
+
+  # A category the import has just created is put into the cache, so that the
+  # rows that follow find it instead of building it a second time
+  def remember_category(project, category)
+    return if project.nil? || category.nil? || category.new_record?
+
+    @category_by_project_and_name[[project.id, category.name]] = category
+  end
+
+  # One line in the log telling how long the import took and how fast it went,
+  # so that a slow run can be compared against the timeout of the frontend
+  # without instrumenting anything by hand
+  def log_import_rate
+    return if @import_started_at.nil?
+
+    elapsed = Time.now - @import_started_at
+    rate = elapsed > 0 ? (@processed_rows / elapsed).round(1) : 0
+    Rails.logger.info(
+      "redmine_importer: #{@processed_rows} rows in #{elapsed.round(1)}s " \
+      "(#{rate} rows/s), created #{@created_issue_ids.size}, " \
+      "updated #{@updated_issue_ids.size}, skipped #{@skip_count}, " \
+      "failed #{@failed_count}"
+    )
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot log the rate of the import (#{e.message})"
   end
 
   # Starts reporting the progress. The import must run even when the progress
@@ -1160,6 +1231,7 @@ class ImporterController < ApplicationController
   def start_progress(iip)
     @iip = iip
     @progress = iip
+    @import_started_at = Time.now
     @progress_written_at = Time.now
     @progress.report!(stage: ImportInProgress::STAGE_PREPARING,
                       processed_rows: 0, created_count: 0, updated_count: 0,
@@ -1222,8 +1294,8 @@ class ImporterController < ApplicationController
     { stage: stage || @progress.stage,
       total_rows: @total_rows.to_i,
       processed_rows: @processed_rows.to_i,
-      created_count: @created_issues.size,
-      updated_count: @updated_issues.size,
+      created_count: @created_issue_ids.size,
+      updated_count: @updated_issue_ids.size,
       skipped_count: @skip_count.to_i,
       failed_count: @failed_count.to_i }
   end
@@ -1385,9 +1457,9 @@ class ImporterController < ApplicationController
     else
       query = build_unique_query(unique_attr, '=', attr_value, row_data)
 
+      # No eager loading here: this runs once per row, and preloading seven
+      # associations costs seven queries for data the update rarely reads.
       issues = Issue.joins([:project])
-                    .includes(%i[assigned_to status tracker project priority
-                                 category fixed_version])
                     .limit(2)
                     .where(query.statement)
     end

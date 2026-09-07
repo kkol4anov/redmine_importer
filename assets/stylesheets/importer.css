@@ -118,38 +118,14 @@ display: inline-block;
 }
 
 /* Progress of a running import: shown in place of the form while the request
-   performing the import is still in flight */
-#import-progress { margin: 1em 0; max-width: 680px; }
+   performing the import is still in flight. The bar itself is the progressbar
+   widget of jQuery UI, the same one the import built into Redmine uses, and it
+   is styled by the theme; only the panel around it belongs here. */
+#import-progress-panel { margin: 1em 0; max-width: 680px; }
 
-#import-progress h3 { margin: 0 0 8px 0; }
+#import-progress-panel h3 { margin: 0 0 8px 0; }
 
-.importer-progress-bar {
-  height: 14px;
-  border: 1px solid #628db6;
-  border-radius: 3px;
-  background-color: #f6f6f6;
-  overflow: hidden;
-}
-
-.importer-progress-value {
-  height: 100%;
-  width: 0;
-  background-color: #628db6;
-  transition: width 0.4s ease;
-}
-
-/* The state cannot be read while the import is running (a server handling one
-   request at a time): the bar keeps moving without claiming a position */
-.importer-progress-bar.indeterminate .importer-progress-value {
-  width: 35%;
-  transition: none;
-  animation: importer-progress-sweep 1.4s linear infinite;
-}
-
-@keyframes importer-progress-sweep {
-  0% { margin-left: -35%; }
-  100% { margin-left: 100%; }
-}
+#import-details { margin-bottom: 8px; }
 
 .importer-progress-counters {
   margin: 8px 0 4px 0;
@@ -158,11 +134,6 @@ display: inline-block;
 }
 
 .importer-progress-counters > span { margin-right: 14px; white-space: nowrap; }
-
-.importer-progress-counters .importer-progress-percent {
-  font-weight: bold;
-  color: #333;
-}
 
 .importer-progress-note {
   margin: 2px 0;
@@ -185,8 +156,4 @@ display: inline-block;
   margin-right: 18px;
 }
 
-table.importer-issue-list { max-width: 800px; }
-
-table.importer-issue-list td:first-child { width: 80px; white-space: nowrap; }
-
-.importer-issue-list-footer { margin: 4px 0 1.5em 0; font-size: 0.9em; }
+.importer-result-summary li a { margin-left: 4px; }

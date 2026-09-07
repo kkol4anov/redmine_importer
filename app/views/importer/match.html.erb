@@ -20,7 +20,7 @@
     open until the whole file has been processed. The panel takes the place of
     the form while that request is in flight and shows how far the import has
     got, by polling the state the server writes into its row along the way. %>
-<div id="import-progress" style="display: none;"
+<div id="import-progress-panel" style="display: none;"
      data-progress-url="<%= url_for(:controller => 'importer', :action => 'progress',
                                     :project_id => @project.id,
                                     :import_timestamp => @import_timestamp) %>"
@@ -31,14 +31,13 @@
                               'failed'     => l(:label_import_stage_failed) }.to_json %>">
   <h3 id="import-progress-stage"><%= l(:label_import_stage_preparing) %></h3>
 
-  <div class="importer-progress-bar">
-    <div class="importer-progress-value"></div>
+  <%# Same markup as the progress of the import built into Redmine, so that it
+      is the same widget with the same look. %>
+  <div id="import-details">
+    <div id="import-progress"><div id="progress-label">0 / 0</div></div>
   </div>
 
   <p class="importer-progress-counters">
-    <span class="importer-progress-percent" id="import-progress-percent">0%</span>
-    <span><%= l(:label_import_progress_rows) %>
-      <span id="import-progress-processed">0</span>&nbsp;/&nbsp;<span id="import-progress-total">0</span></span>
     <span><%= l(:label_import_progress_created) %> <span id="import-progress-created">0</span></span>
     <span><%= l(:label_import_progress_updated) %> <span id="import-progress-updated">0</span></span>
     <span><%= l(:label_import_progress_skipped) %> <span id="import-progress-skipped">0</span></span>
@@ -310,31 +309,42 @@
     // ------------------------------------------------------------------
     // Progress of the import
     // ------------------------------------------------------------------
-    var progressPanel = $('#import-progress');
+    var progressPanel = $('#import-progress-panel');
+    var progressBar = $('#import-progress');
+    var hasProgressbar = typeof $.fn.progressbar === 'function';
 
     function stageLabel(stage) {
       var labels = progressPanel.data('stage-labels') || {};
       return labels[stage] || labels['importing'] || '';
     }
 
+    // The rows of the file have not been counted yet, or the state cannot be
+    // read at all: the widget then runs its indeterminate animation instead of
+    // claiming a position it does not know.
+    function setBar(value, max) {
+      if (!hasProgressbar) { return; }
+      if (value === false) {
+        progressBar.progressbar('option', 'value', false);
+      } else {
+        progressBar.progressbar('option', {max: Math.max(1, max), value: value});
+      }
+    }
+
     function renderProgress(status) {
-      var percent = Math.max(0, Math.min(100, status.percent || 0));
+      var total = status.total_rows > 0 ? status.total_rows : 0;
 
       $('#import-progress-stage').text(stageLabel(status.stage));
-      $('#import-progress-percent').text(percent + '%');
-      progressPanel.find('.importer-progress-value').css('width', percent + '%');
-      $('#import-progress-processed').text(status.processed_rows);
-      $('#import-progress-total').text(status.total_rows);
+      $('#progress-label').text(status.processed_rows + ' / ' + total);
       $('#import-progress-created').text(status.created_count);
       $('#import-progress-updated').text(status.updated_count);
       $('#import-progress-skipped').text(status.skipped_count);
       $('#import-progress-failed').text(status.failed_count);
 
-      // The rows of the file have not been counted yet (the import is still
-      // being prepared): there is no position to show, only the fact that
-      // the work goes on.
-      var counting = !status.finished && !(status.total_rows > 0);
-      progressPanel.find('.importer-progress-bar').toggleClass('indeterminate', counting);
+      if (!status.finished && total === 0) {
+        setBar(false);
+      } else {
+        setBar(status.processed_rows, total);
+      }
     }
 
     // The state cannot always be read while the import is running: a server
@@ -342,7 +352,7 @@
     // import is over. The bar then says that the import goes on without
     // saying how far it is, instead of standing still at zero.
     function progressUnavailable() {
-      progressPanel.find('.importer-progress-bar').addClass('indeterminate');
+      setBar(false);
       $('#import-progress-stalled').show();
     }
 
@@ -359,10 +369,16 @@
     function watchProgress() {
       $('#map_form, #csv-preview').hide();
       progressPanel.show();
+      if (hasProgressbar) { progressBar.progressbar({value: false}); }
 
       var misses = 0;
       setInterval(function() {
-        $.ajax({url: progressPanel.data('progress-url'), dataType: 'json', cache: false})
+        $.ajax({url: progressPanel.data('progress-url'),
+                dataType: 'json',
+                cache: false,
+                // no global ajax events: they would flash the "loading" box of
+                // Redmine over the page on every poll
+                global: false})
           .done(function(status) {
             if (status && status.stage && status.stage !== 'unknown') {
               misses = 0;

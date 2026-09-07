@@ -1372,23 +1372,32 @@ class ImporterControllerTest < ActionController::TestCase
     post :result, params: build_params(update_issue: 'true', use_issue_id: '1')
     assert_response :success
 
-    assert_equal [], assigns(:created_issues)
-    assert_equal [[@issue.id, 'updated by the import']], assigns(:updated_issues)
-    assert response.body.include?("/issues/#{@issue.id}"),
-           'Expected a link to the updated issue'
+    assert_equal [], assigns(:created_issue_ids)
+    assert_equal [@issue.id], assigns(:updated_issue_ids)
+    assert response.body.include?("issue_id=#{@issue.id}"),
+           'Expected a link opening the updated issue in the issue list'
   end
 
   test 'should record the issues the import has created' do
     post :result, params: creation_params("first new issue\nsecond new issue\n")
     assert_response :success
 
-    created = assigns(:created_issues)
-    assert_equal ['first new issue', 'second new issue'], created.map(&:last)
-    assert_equal [], assigns(:updated_issues)
-    created.each do |id, _subject|
-      assert response.body.include?("/issues/#{id}"),
-             "Expected a link to the created issue ##{id}"
-    end
+    created = assigns(:created_issue_ids)
+    assert_equal ['first new issue', 'second new issue'],
+                 Issue.where(id: created).order(:id).pluck(:subject)
+    assert_equal [], assigns(:updated_issue_ids)
+    assert response.body.include?("issue_id=#{created.join('%2C')}") ||
+           response.body.include?("issue_id=#{created.join(',')}"),
+           'Expected a link opening the created issues in the issue list'
+  end
+
+  test 'should link a long list of imported issues by the range it spans' do
+    ids = (1..(ImporterController::RESULT_ISSUE_LIST_LINK_LIMIT + 1)).to_a
+
+    link = @controller.view_context.imported_issues_link(ids)
+    assert link.include?('op%5Bissue_id%5D=%3E%3C'),
+           'Expected the between operator for a list too long for the address'
+    assert link.include?(ids.min.to_s) && link.include?(ids.max.to_s)
   end
 
   test 'should report the progress of the import' do
