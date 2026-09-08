@@ -1559,6 +1559,60 @@ class ImporterControllerTest < ActionController::TestCase
     assert response.body.include?('Unchanged: 1')
   end
 
+  # --- The mode of the run and the shape of the result -----------------------
+
+  test 'should take the mode from the one control the form now sends' do
+    # the helper still sends the two checkboxes the form used to send
+    post :result, params: id_params("#{@issue.id},foobar,Critical,\n",
+                                    import_mode: 'delete')
+    assert_response :success
+
+    assert_nil Issue.find_by(id: @issue.id),
+               'Expected the chosen mode to win over the older parameters'
+  end
+
+  test 'should create everything when the creation is the chosen mode' do
+    create_issue!(@project, @user, { subject: 'already there', tracker: @tracker })
+
+    assert_difference 'Issue.count', 1 do
+      post :result, params: subject_params("already there,Critical,a second one\n",
+                                           import_mode: 'create')
+    end
+    assert_response :success
+
+    assert_equal 2, Issue.where(subject: 'already there').count
+  end
+
+  test 'should still understand a request built before the modes were one control' do
+    # id_params sends update_issue, the way the form used to
+    post :result, params: id_params("#{@issue.id},renamed,Critical,\n")
+    assert_response :success
+
+    assert_equal 'renamed', @issue.reload.subject
+    assert_equal [@issue.id], assigns(:updated_issue_ids)
+  end
+
+  test 'should show why a row failed next to the row itself' do
+    post :result, params: id_params("999001,nothing,Critical,\n", delete_issues: '1')
+    assert_response :success
+
+    reasons = assigns(:failure_reasons)
+    assert_equal 1, reasons.size
+    assert reasons[1].first.include?('Could not delete issue')
+    assert_equal [], assigns(:messages),
+                 'Expected the reason of a row to stay out of the general messages'
+    assert response.body.include?('Reason')
+  end
+
+  test 'should keep the shape of the result page when nothing failed' do
+    post :result, params: id_params("#{@issue.id},renamed,Critical,\n")
+    assert_response :success
+
+    assert response.body.include?('No row failed'),
+           'Expected the section to be there and to say it is empty'
+    assert response.body.include?('Nothing worth reporting')
+  end
+
   # --- Rows the file failed to describe -------------------------------------
 
   test 'should not create an issue from a row with an empty matching value' do

@@ -51,6 +51,12 @@ class ImporterController < ApplicationController
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
 
+  # What the run does to the issues the file names. One control, because the
+  # three are exclusive: two checkboxes standing for three modes left a state
+  # ("delete" with "update" on) that meant nothing.
+  IMPORT_MODES = %w[create upsert delete].freeze
+  DEFAULT_IMPORT_MODE = 'upsert'
+
   # A cell holding this marker asks for the field to be emptied, whatever the
   # issue holds. The marker itself is never written anywhere: it is turned
   # into an empty value before the field is assigned.
@@ -71,8 +77,9 @@ class ImporterController < ApplicationController
   PROGRESS_UPDATE_INTERVAL = 0.5
   # The result page links to the imported issues by putting their ids into the
   # address of the issue list. Above this many ids the address grows past what
-  # servers accept, and the link falls back to the range the ids span.
-  RESULT_ISSUE_LIST_LINK_LIMIT = 500
+  # servers accept - they answer with a 500 - and the link falls back to the
+  # range the ids span.
+  RESULT_ISSUE_LIST_LINK_LIMIT = 300
 
   def index; end
 
@@ -210,7 +217,8 @@ class ImporterController < ApplicationController
     # and nothing is written to them, so the options that only apply to writing
     # are switched off in the form and ignored here, whatever reaches the
     # server.
-    delete_issues = params[:delete_issues].present?
+    mode = import_mode
+    delete_issues = mode == 'delete'
     @delete_mode = delete_issues
 
     # The update is the default and is combined with the creation: a row whose
@@ -222,7 +230,7 @@ class ImporterController < ApplicationController
     # back: an empty cell empties the field.
     @clear_empty_cells = params[:clear_empty_cells].present? && !delete_issues
 
-    update_issue = params[:update_issue].present? && !delete_issues
+    update_issue = mode == 'upsert'
     update_other_project = params[:update_other_project]
     send_emails = params[:send_emails].present? && !delete_issues
     add_categories = params[:add_categories].present? && !delete_issues
@@ -578,11 +586,10 @@ class ImporterController < ApplicationController
         @handle_count += 1
 
       else
-        @failed_count += 1
-        @failed_issues[@failed_count] = row
-        @messages << l(:warning_validation_errors, issue_num: @failed_count)
+        number = record_failure(row)
+        add_failure_reason(number, l(:warning_validation_errors, issue_num: number))
         issue.errors.each do |attr, error_message|
-          @messages << l(:warning_attr_error, attr: attr, message: error_message)
+          add_failure_reason(number, l(:warning_attr_error, attr: attr, message: error_message))
         end
       end
     end # do
@@ -1221,6 +1228,14 @@ class ImporterController < ApplicationController
     raw_value.to_s.strip.present? || @clear_empty_cells
   end
 
+  # The deletion reads no user out of the file, so the option is switched off
+  # in the form and ignored here. An unknown login in a column the matching
+  # looks at then fails the row instead of quietly matching by the anonymous
+  # user - which for a deletion is the safer of the two.
+  def use_anonymous?
+    params[:use_anonymous].present? && !@delete_mode
+  end
+
   def clear_marker?(raw_value)
     raw_value.to_s.strip.casecmp(CLEAR_VALUE_MARKER).zero?
   end
@@ -1272,9 +1287,9 @@ class ImporterController < ApplicationController
     register_deferred_reference(parent_value, :set_parent, row, unique_field,
                                 column: @attrs_map['standard_field-parent_issue'])
   rescue MultipleIssuesForUniqueValue
-    @failed_count += 1
-    @failed_issues[@failed_count] = row
-    @messages << l(:warning_parent_multiple_matches, issue_num: @failed_count, value: parent_value)
+    number = record_failure(row)
+    add_failure_reason(number, l(:warning_parent_multiple_matches, issue_num: number,
+                                                                   value: parent_value))
     raise RowFailed
   end
 
@@ -1299,6 +1314,8 @@ class ImporterController < ApplicationController
     # that such a row is not taken for one that changed nothing
     @row_touched_issue = false
     @failed_issues = {}
+    # Why each of them failed, filed under the same number
+    @failure_reasons = {}
     @messages = []
     @affect_projects_issues = {}
     # Progress of the import: the rows of the file and the issues they gave
@@ -1367,12 +1384,11 @@ class ImporterController < ApplicationController
             @row_touched_issue = true
           end
         rescue ActiveRecord::RecordNotFound
-          if watcher_failed_count == 0
-            @failed_count += 1
-            @failed_issues[@failed_count] = row
-          end
+          record_failure(row) if watcher_failed_count == 0
           watcher_failed_count += 1
-          @messages << l(:warning_watcher_not_found, issue_num: @failed_count, login: watcher)
+          add_failure_reason(@failed_count,
+                             l(:warning_watcher_not_found, issue_num: @failed_count,
+                                                           login: watcher))
         end
       end
     end
@@ -1420,11 +1436,12 @@ class ImporterController < ApplicationController
         rescue StandardError
           if custom_failed_count == 0
             custom_failed_count += 1
-            @failed_count += 1
-            @failed_issues[@failed_count] = row
+            record_failure(row)
           end
-          @messages << l(:warning_custom_field_invalid, field_name: cf.name,
-                                                            issue_num: @failed_count, value: value)
+          add_failure_reason(@failed_count,
+                             l(:warning_custom_field_invalid, field_name: cf.name,
+                                                              issue_num: @failed_count,
+                                                              value: value))
         end
       end
     end
@@ -1583,9 +1600,24 @@ class ImporterController < ApplicationController
   end
 
   def log_failure(row, msg)
+    add_failure_reason(record_failure(row), msg)
+  end
+
+  # Registers a row that could not be imported and returns the number the
+  # reasons are filed under - the one the result page shows in its first
+  # column.
+  def record_failure(row)
     @failed_count += 1
     @failed_issues[@failed_count] = row
-    @messages << msg
+    @failed_count
+  end
+
+  # Why a row failed. It is shown next to the row on the result page rather
+  # than in the general list of messages: a file with seven hundred bad rows used
+  # to bury everything else under seven hundred lines.
+  def add_failure_reason(number, message)
+    (@failure_reasons[number] ||= []) << message
+    number
   end
 
   def record_imported_issue(issue, created)
@@ -1773,6 +1805,19 @@ class ImporterController < ApplicationController
     # A file that cannot be parsed at all is reported by the import itself
     Rails.logger.warn "redmine_importer: cannot read the headers of the file (#{e.message})"
     []
+  end
+
+  # The mode the run was asked for, defaulting to the combined one.
+  #
+  # A request that carries no mode was built before the three became one
+  # control - a saved set of rules, a script - and said the same thing with
+  # two checkboxes, an absent one meaning off.
+  def import_mode
+    mode = params[:import_mode].to_s
+    return mode if IMPORT_MODES.include?(mode)
+    return 'delete' if params[:delete_issues].present?
+
+    params[:update_issue].present? ? 'upsert' : 'create'
   end
 
   # Number of the data rows of the file, the header excluded
@@ -1996,7 +2041,7 @@ class ImporterController < ApplicationController
 
       @user_by_login[login] = user
     rescue ActiveRecord::RecordNotFound
-      if params[:use_anonymous]
+      if use_anonymous?
         @user_by_login[login] = User.anonymous
       else
         @unfound_class = 'User'

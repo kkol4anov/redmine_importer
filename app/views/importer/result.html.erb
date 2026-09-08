@@ -37,9 +37,14 @@
   <% end %>
 </p>
 
-<% if not @messages.empty? %>
-  <hr/>
-  <h3><%= l(:label_result_messages) %></h3>
+<%# The page keeps its shape whether the run went through or not: the same
+    sections in the same order, so that a good result is not read by its
+    silence. Only what stands in them changes. %>
+<hr/>
+<h3><%= l(:label_result_messages) %></h3>
+<% if @messages.blank? %>
+  <p><%= l(:label_result_messages_none) %></p>
+<% else %>
   <ul>
     <% @messages.each do |m| %>
       <li><%= m %></li>
@@ -48,14 +53,17 @@
 <% end %>
 
 <hr/>
-<% if @failed_count > 0 %>
-  <h3><%= l(:label_result_failed, @failed_count) %></h3>
+<h3><%= l(:label_result_failed, @failed_count.to_i) %></h3>
+<% if @failed_count.to_i.zero? %>
+  <p><%= l(:label_result_failed_none) %></p>
+<% else %>
   <table class="list">
     <thead>
       <tr>
         <th>#</th>
+        <th><%= l(:label_result_failed_reason) %></th>
         <% @headers.each do |column| %>
-          <th><%= column.unpack('U*').pack('U*')  %></th>
+          <th><%= force_utf8(column) %></th>
         <% end %>
       </tr>
     </thead>
@@ -63,9 +71,16 @@
       <% @failed_issues.each do |id, issue| -%>
         <tr class="<%= cycle("odd", "even") %>">
           <td><%= id %></td>
+          <td class="importer-failure-reason">
+            <%# Every reason sits next to the row it is about, instead of
+                being lost among the messages of the other rows. %>
+            <% Array(@failure_reasons[id]).each do |reason| %>
+              <%= reason %><br/>
+            <% end %>
+          </td>
           <% issue.each do |column| %>
             <%- data = column[1] -%>
-            <%- data = data.unpack('U*').pack('U*') if data.is_a?(String) -%>
+            <%- data = force_utf8(data) if data.is_a?(String) -%>
             <%= content_tag 'td', data %>
           <% end %>
         </tr>
