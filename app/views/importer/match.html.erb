@@ -61,6 +61,30 @@
   <fieldset class="box">
     <legend><%= l(:label_import_rule) %></legend>
 
+    <%# What the run does to the issues the file names. Everything below reads
+        differently depending on it, so it comes first. All three can be
+        chosen at any time: the update and the deletion need something to
+        match the issues by, and say so when there is nothing. %>
+    <div id="import_mode_wrapper" class="rule-row">
+      <label class="rule-label" for="import_mode"><%= l(:label_import_mode) %></label>
+      <%= select_tag "import_mode",
+        options_for_select([[l(:label_import_mode_create), 'create'],
+                            [l(:label_import_mode_upsert), 'upsert'],
+                            [l(:label_import_mode_delete), 'delete']],
+                           ImporterController::DEFAULT_IMPORT_MODE) %>
+      <%= importer_hint(safe_join([
+            content_tag(:span, l(:label_import_mode_info)),
+            content_tag(:ul, safe_join([
+              content_tag(:li, l(:label_import_mode_create_info)),
+              content_tag(:li, l(:label_import_mode_upsert_info)),
+              content_tag(:li, l(:label_import_mode_delete_info))
+            ]))
+          ])) %>
+      <span id="import_mode_warning" class="importer-warning" style="display: none;">
+        <%= l(:warning_mode_needs_unique_field) %>
+      </span>
+    </div>
+
     <label>
       <%= check_box_tag "use_issue_id", true, false %>
       <%= l(:label_importer_use_issue_id) %>
@@ -178,38 +202,6 @@
       <br/>
     </div>
 
-    <%# Three modes, one control. The combined one is the default; both it and
-        the deletion need something to match the issues by, so without it they
-        are switched off and the creation is all that is left - the server
-        does the same. %>
-    <div id="import_mode_wrapper">
-      <span class="importer-mode-legend"><%= l(:label_import_mode) %></span>
-
-      <label>
-        <%= radio_button_tag "import_mode", "create", false %>
-        <%= l(:label_import_mode_create) %>
-      </label>
-      <%= importer_hint(l(:label_import_mode_create_info)) %>
-      <br/>
-
-      <label>
-        <%= radio_button_tag "import_mode", "upsert", true %>
-        <%= l(:label_update_issue) %>
-      </label>
-      <%= importer_hint(l(:label_update_issue_info)) %>
-      <br/>
-
-      <label>
-        <%= radio_button_tag "import_mode", "delete", false %>
-        <%= l(:label_delete_issues) %>
-      </label>
-      <%= importer_hint(l(:label_delete_issues_info)) %>
-
-      <span id="import_mode_warning" class="importer-warning" style="display: none;">
-        <%= l(:warning_delete_without_unique_field) %>
-      </span>
-    </div>
-
     <div id="journal_field_wrapper">
       &nbsp;&nbsp;&nbsp;&nbsp;
       <label>
@@ -276,7 +268,7 @@
     }
 
     function importMode() {
-      return $('input[name="import_mode"]:checked').val() || 'create';
+      return $('#import_mode').val() || 'create';
     }
 
     function deleteMode() {
@@ -296,19 +288,14 @@
     // their values anyway.
     function toggleModes() {
       var matching = uniqueMatchingAvailable();
-
-      // Both the combined mode and the deletion have to find the issues the
-      // rows name. With nothing to match by, the creation is the only mode
-      // left, and a mode already chosen falls back to it.
-      $('#import_mode_upsert, #import_mode_delete').prop('disabled', !matching);
-      if (!matching && importMode() !== 'create') {
-        $('#import_mode_create').prop('checked', true);
-      }
-      $('#import_mode_warning').toggle(!matching);
-
       var mode = importMode();
       var deleting = mode === 'delete';
       var updating = mode === 'upsert';
+
+      // Both the update and the deletion have to find the issues the rows
+      // name. Choosing them with nothing to match by is allowed - the choice
+      // is often made before the columns are - and warned about.
+      $('#import_mode_warning').toggle(!matching && mode !== 'create');
 
       // nothing is written to the issues while they are being deleted, and
       // no user is read out of the file either
@@ -392,8 +379,7 @@
       toggleModes();
     }
 
-    $('#use_issue_id, #unique_field, #extract_unique_value')
-      .add($('input[name="import_mode"]'))
+    $('#use_issue_id, #unique_field, #extract_unique_value, #import_mode')
       .add(fieldsMapSelects())
       .on('change', refreshImportRules);
     refreshImportRules();
