@@ -28,6 +28,38 @@
   <li><%= l(:label_result_errors, :count => @failed_count.to_i) %></li>
 </ul>
 
+<h3><%= l(:label_result_rows) %></h3>
+<% if @row_results.blank? %>
+  <p><%= l(:label_result_rows_none) %></p>
+<% else %>
+  <table class="list importer-result-rows">
+    <thead>
+      <tr>
+        <th><%= l(:label_result_status) %></th>
+        <th><%= l(:field_issue) %></th>
+        <th><%= l(:field_subject) %></th>
+        <th><%= l(:label_result_failed_reason) %></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @row_results.each do |result| %>
+        <tr class="<%= cycle('odd', 'even') %>">
+          <td><%= l("label_import_result_#{result[:status]}".to_sym) %></td>
+          <td>
+            <% if result[:issue_id].present? && %i[created updated unchanged].include?(result[:status]) %>
+              <%= link_to "##{result[:issue_id]}", issue_path(result[:issue_id]) %>
+            <% elsif result[:issue_id].present? %>
+              #<%= result[:issue_id] %>
+            <% end %>
+          </td>
+          <td><%= force_utf8(result[:subject]) if result[:subject].is_a?(String) %></td>
+          <td class="importer-failure-reason"><%= safe_join(Array(result[:reasons]), content_tag(:br)) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>
+
 <p><%= l(:label_result_projects) %>
   <br/>
   <% @affect_projects_issues.each do |project, count|%>

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'csv'
+require 'securerandom'
 require 'tempfile'
 
 class MultipleIssuesForUniqueValue < RuntimeError
@@ -8,6 +9,7 @@ class MultipleIssuesForUniqueValue < RuntimeError
 end
 NoIssueForUniqueValue = Class.new(RuntimeError)
 UnusableUniqueField = Class.new(RuntimeError)
+ImportCancelled = Class.new(RuntimeError)
 
 class ImporterController < ApplicationController
   using RedmineImporter::Patches::Redmine51ToFsMethodPatch
@@ -50,6 +52,9 @@ class ImporterController < ApplicationController
   # Max number of candidates loaded by a substring lookup before the exact
   # match is checked in Ruby
   EXTRACTION_CANDIDATES_LIMIT = 100
+  # Several row lookups are combined into one SQL statement. Keeping batches
+  # modest avoids database-specific limits on statement size and bind values.
+  LOOKUP_BATCH_SIZE = 25
 
   # What the run does to the issues the file names. One control, because the
   # three are exclusive: two checkboxes standing for three modes left a state
@@ -167,6 +172,11 @@ class ImporterController < ApplicationController
   def result
     run_import
     finish_progress
+  rescue ImportCancelled
+    @cancelled = true
+    @messages << l(:notice_import_cancelled)
+    finalize_import if @import_started_at
+    finish_progress(cancelled: true)
   rescue StandardError
     finish_progress(failed: true)
     raise
@@ -184,6 +194,17 @@ class ImporterController < ApplicationController
 
     expires_now
     render json: iip ? iip.as_status : { stage: ImportInProgress::STAGE_UNKNOWN }
+  end
+
+  # Called with sendBeacon when the page running the import is closed. The
+  # token makes a stale tab unable to cancel a newer import of the same user.
+  def cancel
+    iip = ImportInProgress.current_for(User.current, params[:import_timestamp])
+    iip&.request_cancel!(params[:run_token])
+    head :no_content
+  rescue StandardError => e
+    Rails.logger.warn "redmine_importer: cannot cancel the import (#{e.message})"
+    head :no_content
   end
 
   def run_import
@@ -210,7 +231,10 @@ class ImporterController < ApplicationController
       return
     end
 
-    start_progress(iip)
+    unless start_progress(iip)
+      flash[:error] = l(:error_import_already_running)
+      return
+    end
     # which options were turned on?
     #
     # The deletion is a mode of its own: the rows name the issues to destroy
@@ -366,14 +390,15 @@ class ImporterController < ApplicationController
 
     csv_opt = csv_options(iip)
 
-    # the total is needed to report the progress as a percentage; the rows
-    # were counted in the match step, so the file is parsed once more only
-    # when that count is missing
-    @total_rows = iip.total_rows.to_i
-    @total_rows = count_csv_rows(iip) if @total_rows <= 0
+    # Parse once into rows shared by bulk matching and the write/delete pass.
+    # Keeping a few megabytes in memory is bounded by the upload limit and
+    # avoids reparsing the file for each phase.
+    rows = csv_rows(iip, csv_opt)
+    @total_rows = rows.size
+    warm_issue_lookup_cache(rows, unique_attr, unique_field) if update_issue || delete_issues
     if delete_issues
       report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
-      run_delete(iip, csv_opt, unique_attr, unique_field, ignore_non_exist,
+      run_delete(rows, unique_attr, unique_field, ignore_non_exist,
                  update_other_project)
       report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
       finalize_import
@@ -382,7 +407,7 @@ class ImporterController < ApplicationController
 
     report_progress(stage: ImportInProgress::STAGE_IMPORTING, force: true)
 
-    CSV.new(iip.csv_data, **csv_opt).each do |row|
+    rows.each do |row|
       @processed_rows += 1
       report_progress
       # nothing has been written outside of issue.save for this row yet
@@ -492,6 +517,7 @@ class ImporterController < ApplicationController
 
       if issue_unchanged
         @unchanged_count += 1
+        record_processed_issue(issue, :unchanged)
         issue_saved = true
       else
         begin
@@ -650,9 +676,9 @@ class ImporterController < ApplicationController
   # children before their parents. One row is then one issue, the progress
   # moves row by row, and whatever is still taken along by a cascade is an
   # issue no row named - which is worth saying out loud.
-  def run_delete(iip, csv_opt, unique_attr, unique_field, ignore_non_exist,
+  def run_delete(rows, unique_attr, unique_field, ignore_non_exist,
                  delete_other_project)
-    targets = resolve_delete_targets(iip, csv_opt, unique_attr, unique_field,
+    targets = resolve_delete_targets(rows, unique_attr, unique_field,
                                      ignore_non_exist, delete_other_project)
     # a file that cannot be read at all is reported without anything destroyed
     return if flash[:error].present?
@@ -660,12 +686,12 @@ class ImporterController < ApplicationController
     destroy_delete_targets(targets)
   end
 
-  def resolve_delete_targets(iip, csv_opt, unique_attr, unique_field,
+  def resolve_delete_targets(rows, unique_attr, unique_field,
                              ignore_non_exist, delete_other_project)
     report_progress(stage: ImportInProgress::STAGE_MATCHING, force: true)
     rows_by_id = {}
 
-    CSV.new(iip.csv_data, **csv_opt).each do |row|
+    rows.each do |row|
       @processed_rows += 1
       report_progress
 
@@ -680,6 +706,7 @@ class ImporterController < ApplicationController
         # "ignore non-existant issues".
         if ignore_non_exist
           @skip_count += 1
+          record_skipped_row(row)
         else
           log_failure(row,
                       l(:warning_no_match_for_delete, issue_num: @failed_count + 1,
@@ -705,6 +732,7 @@ class ImporterController < ApplicationController
       # update guards it: an issue found by its id may live anywhere.
       if issue.project_id != @project.id && !delete_other_project
         @skip_count += 1
+        record_skipped_row(row)
         next
       end
 
@@ -721,13 +749,18 @@ class ImporterController < ApplicationController
       if rows_by_id.key?(issue.id)
         @duplicate_rows += 1
         @skip_count += 1
+        record_skipped_row(row)
         next
       end
 
-      rows_by_id[issue.id] = row
+      # Keep the loaded object for the destructive pass. Loading every issue
+      # once again there used to add one query per CSV row.
+      has_descendants = issue.respond_to?(:lft) && issue.respond_to?(:rgt) &&
+                        issue.rgt.to_i > issue.lft.to_i + 1
+      rows_by_id[issue.id] = [issue, row, has_descendants]
     end
 
-    order_leaves_first(rows_by_id.keys).map { |id| [id, rows_by_id[id]] }
+    order_leaves_first(rows_by_id.keys).map { |id| rows_by_id[id] }
   end
 
   # Puts every child before the issue it hangs under, so that a parent is
@@ -748,18 +781,15 @@ class ImporterController < ApplicationController
     @processed_rows = 0
     report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
 
-    targets.each do |id, row|
+    targets.each do |issue, row, has_descendants|
       @processed_rows += 1
       report_progress
 
-      issue = Issue.find_by_id(id)
-      if issue.nil?
-        # gone between the two passes - not by this run, the children go first
-        @skip_count += 1
-        next
-      end
-
-      delete_issue(issue, row)
+      # Removing a child changes the nested-set bounds of its ancestors. Only
+      # those relatively rare rows need a refresh; flat issues keep the object
+      # loaded by the matching phase and avoid the old query per row.
+      issue.reload if has_descendants
+      delete_issue(issue, row, load_descendants: has_descendants)
     end
 
     report_delete_messages
@@ -775,15 +805,21 @@ class ImporterController < ApplicationController
     @messages << l(:warning_duplicate_delete_rows, count: @duplicate_rows)
   end
 
-  def delete_issue(issue, row)
+  def delete_issue(issue, row, load_descendants: true)
     project = issue.project
+    issue_snapshot = { id: issue.id, subject: issue.subject }
     # With the children of the file destroyed first, whatever still hangs
     # under this issue is a subtask no row named. It goes with the issue all
     # the same - Redmine leaves no orphans - and that is worth reporting.
-    descendants = issue.respond_to?(:descendants) ? issue.descendants.pluck(:id).compact : []
+    descendants = if load_descendants && issue.respond_to?(:descendants)
+                    issue.descendants.pluck(:id).compact
+                  else
+                    []
+                  end
 
     if issue.destroy
       @deleted_issue_ids << issue.id
+      record_processed_issue(issue_snapshot, :deleted)
       unless descendants.empty?
         @unnamed_deleted_ids.concat(descendants)
         @deleted_issue_ids.concat(descendants)
@@ -978,7 +1014,7 @@ class ImporterController < ApplicationController
   # so that the row is matched against the issues of exactly that tracker.
   def tracker_scope_id(row, field)
     name = field[:column].present? ? row[field[:column]].to_s.strip : ''
-    tracker = Tracker.find_by_name(name) if name.present?
+    tracker = tracker_by_name(name) if name.present?
 
     tracker&.id || field[:default]
   end
@@ -1056,6 +1092,7 @@ class ImporterController < ApplicationController
       unless matchable_row?(row, unique_field)
         if ignore_non_exist
           @skip_count += 1
+          record_skipped_row(row)
         else
           log_failure(row, l(:warning_no_unique_value_to_match,
                              issue_num: @failed_count + 1, column: unique_field))
@@ -1069,6 +1106,7 @@ class ImporterController < ApplicationController
         # ignore other project's issue or not
         if issue.project_id != @project.id && !update_other_project
           @skip_count += 1
+          record_skipped_row(row)
           raise RowFailed
         end
 
@@ -1076,6 +1114,7 @@ class ImporterController < ApplicationController
         if issue.status.is_closed?
           if status.nil? || status.is_closed?
             @skip_count += 1
+            record_skipped_row(row)
             raise RowFailed
           end
         end
@@ -1095,6 +1134,7 @@ class ImporterController < ApplicationController
         # alone: such a row is then left alone instead.
         if ignore_non_exist
           @skip_count += 1
+          record_skipped_row(row)
           raise RowFailed
         end
 
@@ -1316,6 +1356,8 @@ class ImporterController < ApplicationController
     @failed_issues = {}
     # Why each of them failed, filed under the same number
     @failure_reasons = {}
+    # Uniform task-by-task result shown for successful and failed runs.
+    @row_results = []
     @messages = []
     @affect_projects_issues = {}
     # Progress of the import: the rows of the file and the issues they gave
@@ -1342,6 +1384,8 @@ class ImporterController < ApplicationController
     # the user provided in the unique column (combined with the values of
     # the scope custom fields when such a scope is used)
     @issue_by_unique_attr = {}
+    # Bulk lookup results also cache misses and duplicate matches.
+    @issue_lookup_results = {}
     # Identifiers already reported as matching too many issues
     @too_many_candidates = Set.new
     # Cache of user id by login
@@ -1609,6 +1653,13 @@ class ImporterController < ApplicationController
   def record_failure(row)
     @failed_count += 1
     @failed_issues[@failed_count] = row
+    reasons = (@failure_reasons[@failed_count] ||= [])
+    @row_results << {
+      status: :failed,
+      issue_id: result_row_value(row, 'standard_field-id'),
+      subject: result_row_value(row, 'standard_field-subject'),
+      reasons: reasons
+    }
     @failed_count
   end
 
@@ -1623,9 +1674,31 @@ class ImporterController < ApplicationController
   def record_imported_issue(issue, created)
     if created
       @created_issue_ids << issue.id
+      record_processed_issue(issue, :created)
     else
       @updated_issue_ids << issue.id
+      record_processed_issue(issue, :updated)
     end
+  end
+
+  def record_processed_issue(issue, status)
+    id = issue.is_a?(Hash) ? issue[:id] : issue.id
+    subject = issue.is_a?(Hash) ? issue[:subject] : issue.subject
+    @row_results << { status: status, issue_id: id, subject: subject, reasons: [] }
+  end
+
+  def record_skipped_row(row)
+    @row_results << {
+      status: :skipped,
+      issue_id: result_row_value(row, 'standard_field-id'),
+      subject: result_row_value(row, 'standard_field-subject'),
+      reasons: []
+    }
+  end
+
+  def result_row_value(row, field)
+    column = @attrs_map && @attrs_map[field]
+    column.present? ? row[column] : nil
   end
 
   # The lookups below stand in for the find_by_name calls the loop used to make
@@ -1699,6 +1772,9 @@ class ImporterController < ApplicationController
   # off: the browser then falls back to an indeterminate bar.
   def start_progress(iip)
     @iip = iip
+    token = params[:run_token].presence || SecureRandom.uuid
+    return false unless iip.claim!(token)
+
     @progress = iip
     @import_started_at = Time.now
     @progress_written_at = Time.now
@@ -1706,9 +1782,11 @@ class ImporterController < ApplicationController
                       processed_rows: 0, created_count: 0, updated_count: 0,
                       unchanged_count: 0, deleted_count: 0,
                       skipped_count: 0, failed_count: 0, finished_at: nil)
+    true
   rescue StandardError => e
     Rails.logger.warn "redmine_importer: cannot report the progress of the import (#{e.message})"
     @progress = nil
+    true
   end
 
   # Writes the counters into the row of the progress, at most once every
@@ -1720,7 +1798,11 @@ class ImporterController < ApplicationController
     return if !force && stage.nil? && (now - @progress_written_at) < PROGRESS_UPDATE_INTERVAL
 
     @progress_written_at = now
+    raise ImportCancelled if @progress.cancel_requested?
+
     @progress.report!(progress_attributes(stage: stage))
+  rescue ImportCancelled
+    raise
   rescue StandardError => e
     Rails.logger.warn "redmine_importer: cannot report the progress of the import (#{e.message})"
     @progress = nil
@@ -1733,7 +1815,7 @@ class ImporterController < ApplicationController
   # and only loses the file it carried; the next import of the user drops it,
   # as does the cleanup of the rows older than three days. A file that was not
   # imported keeps its payload, so that the import can be retried.
-  def finish_progress(failed: false)
+  def finish_progress(failed: false, cancelled: false)
     return if @iip.nil? || @progress_finished
 
     @progress_finished = true
@@ -1746,7 +1828,13 @@ class ImporterController < ApplicationController
       return
     end
 
-    stage = broken ? ImportInProgress::STAGE_FAILED : ImportInProgress::STAGE_FINISHED
+    stage = if cancelled
+              ImportInProgress::STAGE_CANCELLED
+            elsif broken
+              ImportInProgress::STAGE_FAILED
+            else
+              ImportInProgress::STAGE_FINISHED
+            end
     attributes = progress_attributes(stage: stage).merge(finished_at: Time.now)
     attributes[:csv_data] = nil unless broken
     @progress.report!(attributes)
@@ -1777,6 +1865,107 @@ class ImporterController < ApplicationController
       encoding: 'UTF-8',
       quote_char: iip.quote_char,
       col_sep: iip.col_sep }
+  end
+
+  def csv_rows(iip, csv_opt)
+    CSV.new(iip.csv_data, **csv_opt).map { |row| normalize_row(row) }
+  end
+
+  # Resolves all row identifiers in a handful of queries before writes begin.
+  # This matters especially for extracted identifiers: the old loop issued a
+  # LIKE query for every CSV row, and ActiveRecord's query cache could not help
+  # because each row was followed by a write.
+  def warm_issue_lookup_cache(rows, unique_attr, unique_field)
+    return if unique_attr.blank? || unique_field.blank? || csv_internal_ids?
+
+    lookups = {}
+    rows.each do |row|
+      next unless matchable_row?(row, unique_field)
+
+      key = unique_attr_cache_key(row[unique_field], row)
+      lookups[key] ||= { value: row[unique_field], row: row } if key
+    end
+    return if lookups.empty?
+
+    if use_issue_id && @unique_attr_is_issue_id
+      ids = lookups.values.map { |lookup| lookup[:value].to_s }
+                   .select { |value| value.match?(/\A\d+\z/) }
+      seed_lookup_results(lookups, Issue.where(id: ids).includes(issue_lookup_includes))
+      report_progress(force: true)
+      return
+    end
+
+    lookups.each_slice(LOOKUP_BATCH_SIZE) do |slice|
+      batch = slice.to_h
+      statements = batch.values.map do |lookup|
+        value = extract_unique_value? ? extract_unique_value(lookup[:value]) : lookup[:value]
+        build_unique_query(unique_attr, extract_unique_value? ? '~' : '=', value,
+                           lookup[:row]).statement
+      end
+
+      candidates = Issue.joins(:project)
+                        .includes(issue_lookup_includes)
+                        .where(statements.map { |statement| "(#{statement})" }.join(' OR '))
+                        .to_a
+      seed_lookup_results(batch, candidates, unique_attr)
+      report_progress(force: true)
+    end
+  end
+
+  def issue_lookup_includes
+    %i[assigned_to status tracker project priority category fixed_version custom_values]
+  end
+
+  def seed_lookup_results(lookups, candidates, unique_attr = 'issue_id')
+    lookups.each_key { |key| @issue_lookup_results[key] ||= [] }
+
+    candidates.each do |issue|
+      issue_lookup_cache_keys(issue, unique_attr).each do |key|
+        next unless lookups.key?(key)
+
+        @issue_lookup_results[key] << issue unless @issue_lookup_results[key].any? { |found| found.id == issue.id }
+      end
+    end
+
+    return unless extract_unique_value?
+
+    lookups.each_key do |key|
+      matches = @issue_lookup_results[key]
+      next unless matches.size >= EXTRACTION_CANDIDATES_LIMIT
+      next unless @too_many_candidates.add?(key)
+
+      @messages << l(:warning_extraction_too_many_candidates,
+                     value: key.to_s.split(RedmineImporter::DeferredCallbacks::KEY_SEPARATOR).first,
+                     limit: EXTRACTION_CANDIDATES_LIMIT)
+    end
+  end
+
+  # Builds the same cache key as unique_attr_cache_key, but from a stored
+  # issue. Multiple-valued scope fields produce one key for every value.
+  def issue_lookup_cache_keys(issue, unique_attr)
+    primary_values = if unique_attr == 'issue_id'
+                       [issue.id.to_s]
+                     else
+                       Array(issue_field_value(issue, unique_attr)).filter_map do |value|
+                         extract_unique_value(value)&.to_s
+                       end
+                     end
+    return [] if primary_values.empty?
+
+    component_sets = @unique_scope_fields.map do |field|
+      if field[:tracker]
+        ["#{field[:filter]}=#{issue.tracker_id}"]
+      else
+        values = Array(issue.custom_field_value(field[:custom_field].id)).reject(&:blank?)
+        values.empty? ? ["#{field[:filter]}!*"] : values.map { |value| "#{field[:filter]}=#{value}" }
+      end
+    end
+
+    component_sets.reduce(primary_values) do |keys, components|
+      keys.product(components).map do |key, component|
+        [key, component].join(RedmineImporter::DeferredCallbacks::KEY_SEPARATOR)
+      end
+    end
   end
 
   # The name of the column the rows are matched by when the file has no such
@@ -1966,7 +2155,9 @@ class ImporterController < ApplicationController
       return @issue_by_unique_attr[cache_key]
     end
 
-    if use_issue_id && @unique_attr_is_issue_id
+    if @issue_lookup_results.key?(cache_key)
+      issues = @issue_lookup_results[cache_key]
+    elsif use_issue_id && @unique_attr_is_issue_id
       unless attr_value.to_s.match?(/\A\d+\z/)
         raise NoIssueForUniqueValue,
           "Value '#{attr_value}' is not a valid issue id"

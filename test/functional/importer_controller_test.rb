@@ -1914,6 +1914,45 @@ class ImporterControllerTest < ActionController::TestCase
     assert response.body.include?('not allowed to delete issues')
   end
 
+  test 'should reject a second request while the first owns the import' do
+    params = id_params("#{@issue.id},renamed,Critical,\n", run_token: 'second')
+    assert @iip.claim!('first')
+
+    post :result, params: params
+    assert_response :success
+
+    assert_equal 'foobar', @issue.reload.subject
+    assert response.body.include?('already running')
+  end
+
+  test 'should accept cancellation only from the page running the import' do
+    id_params("#{@issue.id},foobar,Critical,\n")
+    assert @iip.claim!('owner')
+
+    post :cancel, params: { project_id: @project.id,
+                            import_timestamp: @iip.timestamp,
+                            run_token: 'stale' }
+    assert_response :no_content
+    assert_nil @iip.reload.cancel_requested_at
+
+    post :cancel, params: { project_id: @project.id,
+                            import_timestamp: @iip.timestamp,
+                            run_token: 'owner' }
+    assert_response :no_content
+    assert @iip.reload.cancel_requested_at
+  end
+
+  test 'should list successful and failed tasks in one result collection' do
+    post :result, params: id_params("#{@issue.id},renamed,Critical,\n" \
+                                    "999001,missing,Critical,\n",
+                                    import_mode: 'delete')
+    assert_response :success
+
+    assert_equal %i[deleted failed], assigns(:row_results).map { |row| row[:status] }.sort
+    assert response.body.include?('Task results')
+    assert response.body.include?('missing')
+  end
+
   protected
 
   # An import matching the issues by their own ids. The file holds the id, the

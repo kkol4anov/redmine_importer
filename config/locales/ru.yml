@@ -59,6 +59,18 @@ ru:
   label_result_failed_reason: "Причина"
   label_result_messages_none: "Сообщать не о чем."
   label_result_messages: "Сообщения"
+  label_result_rows: "Результаты по задачам"
+  label_result_rows_none: "Ни одна задача не была обработана."
+  label_result_status: "Результат"
+  label_import_result_created: "Создана"
+  label_import_result_updated: "Обновлена"
+  label_import_result_unchanged: "Без изменений"
+  label_import_result_deleted: "Удалена"
+  label_import_result_skipped: "Пропущена"
+  label_import_result_failed: "Ошибка"
+  notice_import_cancelled: "Импорт отменён, потому что его страница была закрыта. Уже сохранённые изменения не откатывались."
+  error_import_already_running: "Этот импорт уже выполняется другим запросом. Дождитесь его завершения или загрузите файл заново."
+  label_import_stage_cancelled: "Импорт отменён"
 
   option_ignore: "Игнорировать"
 

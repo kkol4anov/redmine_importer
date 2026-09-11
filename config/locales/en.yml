@@ -59,6 +59,18 @@ en:
   label_result_failed_reason: "Reason"
   label_result_messages_none: "Nothing worth reporting."
   label_result_messages: "Messages"
+  label_result_rows: "Task results"
+  label_result_rows_none: "No task was processed."
+  label_result_status: "Result"
+  label_import_result_created: "Created"
+  label_import_result_updated: "Updated"
+  label_import_result_unchanged: "Unchanged"
+  label_import_result_deleted: "Deleted"
+  label_import_result_skipped: "Skipped"
+  label_import_result_failed: "Error"
+  notice_import_cancelled: "The import was cancelled because its page was closed. Rows already committed were not rolled back."
+  error_import_already_running: "This import is already running in another request. Wait for it to finish or upload the file again."
+  label_import_stage_cancelled: "Import cancelled"
 
   option_ignore: "Ignore"
 

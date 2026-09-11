@@ -35,4 +35,32 @@ class ImportInProgressTest < ActiveSupport::TestCase
     assert utf8_retagged.valid_encoding?
     assert utf8_retagged.include?('テスト')
   end
+
+  test 'only one request can claim an import' do
+    iip = ImportInProgress.create!(encoding: 'U', col_sep: ',', quote_char: '"',
+                                   created: Time.current, user: @admin,
+                                   csv_data: "id,subject\n1,test\n")
+
+    assert iip.claim!('first-request')
+    assert_not iip.claim!('second-request')
+    assert_equal 'first-request', iip.reload.run_token
+  end
+
+  test 'only the request that claimed an import can cancel it' do
+    iip = ImportInProgress.create!(encoding: 'U', col_sep: ',', quote_char: '"',
+                                   created: Time.current, user: @admin,
+                                   csv_data: "id,subject\n1,test\n")
+    assert iip.claim!('owner')
+
+    assert_not iip.request_cancel!('stale-tab')
+    assert_nil iip.reload.cancel_requested_at
+    assert iip.request_cancel!('owner')
+    assert iip.cancel_requested?
+  end
+
+  test 'cancelled is a final stage' do
+    iip = ImportInProgress.new(stage: ImportInProgress::STAGE_CANCELLED)
+    assert iip.finished?
+    assert_equal 100, iip.percent_complete
+  end
 end

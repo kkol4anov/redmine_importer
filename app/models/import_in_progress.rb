@@ -18,10 +18,12 @@ class ImportInProgress < ActiveRecord::Base
   STAGE_FINISHED = 'finished'
   # The import was stopped by an error and its result page carries it
   STAGE_FAILED = 'failed'
+  # The browser left the import page and asked the worker to stop
+  STAGE_CANCELLED = 'cancelled'
   # There is no import of this user to report on
   STAGE_UNKNOWN = 'unknown'
 
-  FINAL_STAGES = [STAGE_FINISHED, STAGE_FAILED].freeze
+  FINAL_STAGES = [STAGE_FINISHED, STAGE_FAILED, STAGE_CANCELLED].freeze
 
   belongs_to :user
   belongs_to :project
@@ -50,6 +52,36 @@ class ImportInProgress < ActiveRecord::Base
   # it, and so that no callback or validation slows down the loop.
   def report!(attributes)
     update_columns(attributes.merge(refreshed_at: Time.now))
+  end
+
+  # Claims the row for exactly one result request. The conditional UPDATE is
+  # deliberately atomic: checking +running?+ and updating afterwards lets two
+  # near-simultaneous submissions import the same CSV twice.
+  def claim!(token)
+    return false if token.blank?
+
+    claimed = self.class.where(id: id, run_token: [nil, ''], finished_at: nil)
+                        .update_all(run_token: token, cancel_requested_at: nil,
+                                    stage: STAGE_PREPARING,
+                                    refreshed_at: Time.now)
+    reload if claimed == 1
+    claimed == 1
+  end
+
+  def request_cancel!(token)
+    return false if token.blank?
+
+    changed = self.class.where(id: id, run_token: token, finished_at: nil)
+                        .update_all(cancel_requested_at: Time.now,
+                                    refreshed_at: Time.now)
+    changed == 1
+  end
+
+  # Reload only the one column used as a cooperative cancellation flag. This
+  # is called at the same throttled cadence as progress reporting, not for
+  # every imported field.
+  def cancel_requested?
+    self.class.where(id: id).pluck(:cancel_requested_at).first.present?
   end
 
   def finished?

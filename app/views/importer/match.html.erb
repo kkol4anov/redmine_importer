@@ -4,21 +4,23 @@
 
 <h2><%= l(:label_match_columns) %></h2>
 
-<%# The import runs inside the request started by the form below, which stays
-    open until the whole file has been processed. The panel takes the place of
-    the form while that request is in flight and shows how far the import has
-    got, by polling the state the server writes into its row along the way. %>
+<%# The import runs inside the asynchronous request started by the form below.
+    The mapping page stays alive until the whole file has been processed, so it
+    can poll progress and request cancellation if the user closes it. %>
 <div id="import-progress-panel" style="display: none;"
      data-progress-url="<%= url_for(:controller => 'importer', :action => 'progress',
                                     :project_id => @project.id,
                                     :import_timestamp => @import_timestamp) %>"
+     data-cancel-url="<%= url_for(:controller => 'importer', :action => 'cancel',
+                                  :project_id => @project.id) %>"
      data-stage-labels="<%= { 'preparing'  => l(:label_import_stage_preparing),
                               'importing'  => l(:label_import_stage_importing),
                               'matching'   => l(:label_import_stage_matching),
                               'deleting'   => l(:label_import_stage_deleting),
                               'finalizing' => l(:label_import_stage_finalizing),
                               'finished'   => l(:label_import_stage_finished),
-                              'failed'     => l(:label_import_stage_failed) }.to_json %>">
+                              'failed'     => l(:label_import_stage_failed),
+                              'cancelled'  => l(:label_import_stage_cancelled) }.to_json %>">
   <h3 id="import-progress-stage"><%= l(:label_import_stage_preparing) %></h3>
 
   <%# Same markup as the progress of the import built into Redmine, so that it
@@ -44,6 +46,7 @@
 <%= form_tag({:action => 'result'}, {:multipart => true, :id => 'map_form'}) do %>
   <%= hidden_field_tag 'project_id', @project.id %>
   <%= hidden_field_tag 'import_timestamp', @import_timestamp %>
+  <%= hidden_field_tag 'run_token', '' %>
 
   <fieldset class="box">
     <legend><%= l(:label_match_select) %></legend>
@@ -442,10 +445,38 @@
       $('#import-progress-stalled').hide();
     }
 
-    // The form is submitted the ordinary way. The browser keeps this page
-    // alive until the answer arrives, so the panel goes on polling while the
-    // import runs, and the result page then loads as a normal page. The
-    // polling stops by itself when the browser leaves for it.
+    var importRequest = null;
+    var importRunning = false;
+    var importCompleted = false;
+
+    function newRunToken() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+
+    function requestCancellation() {
+      if (!importRunning || importCompleted) { return; }
+
+      var data = new FormData();
+      data.append('import_timestamp', $('input[name="import_timestamp"]').val());
+      data.append('run_token', $('input[name="run_token"]').val());
+      var csrf = $('input[name="authenticity_token"]').val();
+      if (csrf) { data.append('authenticity_token', csrf); }
+
+      var url = progressPanel.data('cancel-url');
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, data);
+      } else if (window.fetch) {
+        fetch(url, {method: 'POST', body: data, credentials: 'same-origin', keepalive: true});
+      }
+      if (importRequest) { importRequest.abort(); }
+    }
+
+    // Keep the mapping page alive while the POST runs. That gives pagehide a
+    // chance to distinguish the result replacing this page from the user
+    // actually closing or leaving it, and to request cooperative cancellation.
     function watchProgress() {
       // the deletion fills a counter of its own and none of the others
       var deleting = deleteMode();
@@ -479,10 +510,40 @@
       }, 1000);
     }
 
-    $('#map_form').on('submit', function() {
+    window.addEventListener('pagehide', requestCancellation);
+
+    $('#map_form').on('submit', function(event) {
+      event.preventDefault();
+      if (importRunning) { return false; }
+
+      var form = this;
+      $('input[name="run_token"]').val(newRunToken());
+      importRunning = true;
       $('#import-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});
       if (progressPanel.length) { watchProgress(); }
-      return true;
+
+      importRequest = $.ajax({
+        url: form.action,
+        type: 'POST',
+        data: new FormData(form),
+        processData: false,
+        contentType: false,
+        dataType: 'html',
+        global: false
+      }).done(function(html) {
+        importCompleted = true;
+        window.history.replaceState(null, '', form.action);
+        document.open();
+        document.write(html);
+        document.close();
+      }).fail(function(_xhr, status) {
+        if (status === 'abort') { return; }
+        importRunning = false;
+        $('#map_form, #csv-preview').show();
+        progressPanel.hide();
+        $('#import-button').prop('disabled', false).css({opacity: '', cursor: ''});
+      });
+      return false;
     });
   });
 </script>

@@ -6,4 +6,5 @@ resources :projects do
   get '/importer/result', to: 'importer#result'
   post '/importer/result', to: 'importer#result'
   get '/importer/progress', to: 'importer#progress'
+  post '/importer/cancel', to: 'importer#cancel'
 end
