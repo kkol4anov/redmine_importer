@@ -14,6 +14,7 @@
      data-cancel-url="<%= url_for(:controller => 'importer', :action => 'cancel',
                                   :project_id => @project.id) %>"
      data-stage-labels="<%= { 'preparing'  => l(:label_import_stage_preparing),
+                              'lookup'     => l(:label_import_stage_lookup),
                               'importing'  => l(:label_import_stage_importing),
                               'matching'   => l(:label_import_stage_matching),
                               'deleting'   => l(:label_import_stage_deleting),
@@ -446,8 +447,26 @@
     }
 
     var importRequest = null;
+    var progressRequest = null;
+    var progressTimer = null;
+    var pollingStopped = true;
     var importRunning = false;
     var importCompleted = false;
+    var misses = 0;
+
+    function stopProgressPolling() {
+      // Set this before aborting: abort synchronously invokes jQuery's always
+      // callback, which must not be allowed to schedule the next request.
+      pollingStopped = true;
+      if (progressTimer !== null) {
+        window.clearTimeout(progressTimer);
+        progressTimer = null;
+      }
+      if (progressRequest) {
+        progressRequest.abort();
+        progressRequest = null;
+      }
+    }
 
     function newRunToken() {
       if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -458,6 +477,8 @@
 
     function requestCancellation() {
       if (!importRunning || importCompleted) { return; }
+
+      stopProgressPolling();
 
       var data = new FormData();
       data.append('import_timestamp', $('input[name="import_timestamp"]').val());
@@ -474,6 +495,45 @@
       if (importRequest) { importRequest.abort(); }
     }
 
+    function scheduleProgressPoll(delay) {
+      if (pollingStopped || !importRunning || importCompleted || progressTimer !== null) { return; }
+      progressTimer = window.setTimeout(pollProgress, delay);
+    }
+
+    function pollProgress() {
+      progressTimer = null;
+      if (pollingStopped || !importRunning || importCompleted || progressRequest) { return; }
+
+      progressRequest = $.ajax({url: progressPanel.data('progress-url'),
+                                dataType: 'json',
+                                cache: false,
+                                // no global ajax events: they would flash the
+                                // "loading" box of Redmine over every poll
+                                global: false})
+        .done(function(status) {
+          if (status && status.stage && status.stage !== 'unknown') {
+            misses = 0;
+            progressAvailable();
+            renderProgress(status);
+            // The final progress write can precede the HTML response slightly.
+            // Stop polling during that gap as well.
+            if (status.finished) {
+              importCompleted = true;
+              pollingStopped = true;
+            }
+          } else if (++misses >= 5) {
+            progressUnavailable();
+          }
+        })
+        .fail(function(_xhr, status) {
+          if (status !== 'abort' && ++misses >= 5) { progressUnavailable(); }
+        })
+        .always(function() {
+          progressRequest = null;
+          scheduleProgressPoll(1000);
+        });
+    }
+
     // Keep the mapping page alive while the POST runs. That gives pagehide a
     // chance to distinguish the result replacing this page from the user
     // actually closing or leaving it, and to request cooperative cancellation.
@@ -487,27 +547,9 @@
       progressPanel.show();
       if (hasProgressbar) { progressBar.progressbar({value: false}); }
 
-      var misses = 0;
-      setInterval(function() {
-        $.ajax({url: progressPanel.data('progress-url'),
-                dataType: 'json',
-                cache: false,
-                // no global ajax events: they would flash the "loading" box of
-                // Redmine over the page on every poll
-                global: false})
-          .done(function(status) {
-            if (status && status.stage && status.stage !== 'unknown') {
-              misses = 0;
-              progressAvailable();
-              renderProgress(status);
-            } else if (++misses >= 5) {
-              progressUnavailable();
-            }
-          })
-          .fail(function() {
-            if (++misses >= 5) { progressUnavailable(); }
-          });
-      }, 1000);
+      misses = 0;
+      pollingStopped = false;
+      scheduleProgressPoll(0);
     }
 
     window.addEventListener('pagehide', requestCancellation);
@@ -532,6 +574,9 @@
         global: false
       }).done(function(html) {
         importCompleted = true;
+        importRunning = false;
+        stopProgressPolling();
+        window.removeEventListener('pagehide', requestCancellation);
         window.history.replaceState(null, '', form.action);
         document.open();
         document.write(html);
@@ -539,6 +584,7 @@
       }).fail(function(_xhr, status) {
         if (status === 'abort') { return; }
         importRunning = false;
+        stopProgressPolling();
         $('#map_form, #csv-preview').show();
         progressPanel.hide();
         $('#import-button').prop('disabled', false).css({opacity: '', cursor: ''});

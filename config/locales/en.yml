@@ -133,6 +133,7 @@ en:
   warning_duplicate_unique_value: "Warning: Unique field %{attr} with value '%{value}' in issue %{issue_num} has duplicate record"
 
   label_import_stage_preparing: "Preparing the import…"
+  label_import_stage_lookup: "Looking up issues in batches…"
   label_import_stage_importing: "Importing the issues…"
   label_import_stage_matching: "Looking the issues up…"
   label_import_stage_deleting: "Deleting the issues…"

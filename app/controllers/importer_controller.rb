@@ -397,7 +397,6 @@ class ImporterController < ApplicationController
     @total_rows = rows.size
     warm_issue_lookup_cache(rows, unique_attr, unique_field) if update_issue || delete_issues
     if delete_issues
-      report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
       run_delete(rows, unique_attr, unique_field, ignore_non_exist,
                  update_other_project)
       report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
@@ -405,7 +404,7 @@ class ImporterController < ApplicationController
       return
     end
 
-    report_progress(stage: ImportInProgress::STAGE_IMPORTING, force: true)
+    begin_progress_phase(ImportInProgress::STAGE_IMPORTING, rows.size)
 
     rows.each do |row|
       @processed_rows += 1
@@ -688,7 +687,7 @@ class ImporterController < ApplicationController
 
   def resolve_delete_targets(rows, unique_attr, unique_field,
                              ignore_non_exist, delete_other_project)
-    report_progress(stage: ImportInProgress::STAGE_MATCHING, force: true)
+    begin_progress_phase(ImportInProgress::STAGE_MATCHING, rows.size)
     rows_by_id = {}
 
     rows.each do |row|
@@ -777,9 +776,7 @@ class ImporterController < ApplicationController
 
   def destroy_delete_targets(targets)
     # the second pass counts issues, not rows: the bar starts over
-    @total_rows = targets.size
-    @processed_rows = 0
-    report_progress(stage: ImportInProgress::STAGE_DELETING, force: true)
+    begin_progress_phase(ImportInProgress::STAGE_DELETING, targets.size)
 
     targets.each do |issue, row, has_descendants|
       @processed_rows += 1
@@ -1860,6 +1857,14 @@ class ImporterController < ApplicationController
       failed_count: @failed_count.to_i }
   end
 
+  # A multi-pass import gives each visible phase its own denominator. This
+  # keeps the bar meaningful while lookup, matching and deletion run in turn.
+  def begin_progress_phase(stage, total)
+    @total_rows = total.to_i
+    @processed_rows = 0
+    report_progress(stage: stage, force: true)
+  end
+
   def csv_options(iip)
     { headers: true,
       encoding: 'UTF-8',
@@ -1887,10 +1892,13 @@ class ImporterController < ApplicationController
     end
     return if lookups.empty?
 
+    begin_progress_phase(ImportInProgress::STAGE_LOOKUP, lookups.size)
+
     if use_issue_id && @unique_attr_is_issue_id
       ids = lookups.values.map { |lookup| lookup[:value].to_s }
                    .select { |value| value.match?(/\A\d+\z/) }
       seed_lookup_results(lookups, Issue.where(id: ids).includes(issue_lookup_includes))
+      @processed_rows = lookups.size
       report_progress(force: true)
       return
     end
@@ -1908,6 +1916,7 @@ class ImporterController < ApplicationController
                         .where(statements.map { |statement| "(#{statement})" }.join(' OR '))
                         .to_a
       seed_lookup_results(batch, candidates, unique_attr)
+      @processed_rows += batch.size
       report_progress(force: true)
     end
   end

@@ -3,6 +3,8 @@ class ImportInProgress < ActiveRecord::Base
   # The import is being set up: the options are validated and the rows of the
   # file are counted
   STAGE_PREPARING = 'preparing'
+  # Existing issues are fetched in SQL batches before rows are processed
+  STAGE_LOOKUP = 'lookup'
   # The rows are being imported, processed_rows out of total_rows are done
   STAGE_IMPORTING = 'importing'
   # The rows are being turned into the issues they name, before anything is

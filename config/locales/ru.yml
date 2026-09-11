@@ -131,6 +131,7 @@ ru:
   warning_custom_field_invalid: "Внимание: при установке кастомного поля %{field_name} для задачи %{issue_num} ниже значение %{value} оказалось недопустимым"
   warning_duplicate_unique_value: "Внимание: уникальное поле %{attr} со значением «%{value}» в задаче %{issue_num} имеет дубликат"
   label_import_stage_preparing: "Подготовка импорта…"
+  label_import_stage_lookup: "Пакетный поиск задач…"
   label_import_stage_importing: "Импорт задач…"
   label_import_stage_matching: "Поиск задач…"
   label_import_stage_deleting: "Удаление задач…"
