@@ -9,10 +9,12 @@ module RedmineImporter
     # of the custom fields narrowing the scope of the matching.
     KEY_SEPARATOR = "\u001F"
 
-    def initialize(issue_cache:, messages:)
+    def initialize(issue_cache:, messages:, diagnostic_values: [], diagnostic_logger: nil)
       @pending = {}
       @issue_cache = issue_cache
       @messages = messages
+      @diagnostic_values = diagnostic_values.map(&:to_s)
+      @diagnostic_logger = diagnostic_logger
     end
 
     # Registers a callback to be executed when an issue with the given
@@ -23,11 +25,31 @@ module RedmineImporter
     def register(unique_value, callback_name, *args, column: nil, scope: nil)
       @pending[unique_value] ||= []
       @pending[unique_value] << [callback_name, args, column, scope]
+      source_key = args.first
+      if diagnostic_key?(unique_value) || diagnostic_key?(source_key)
+        diagnostic('register', {
+          callback: callback_name,
+          target_key: unique_value,
+          source_key: source_key,
+          column: column,
+          scope: scope
+        })
+      end
     end
 
     # Executes pending callbacks for the given unique_value.
     def execute(unique_value, object)
       return unless (callbacks = @pending.delete(unique_value))
+
+      if diagnostic_key?(unique_value)
+        diagnostic('execute', {
+          target_key: unique_value,
+          target_issue_id: object.id,
+          callbacks: callbacks.map do |name, args, column, scope|
+            { callback: name, source_key: args.first, column: column, scope: scope }
+          end
+        })
+      end
 
       callbacks.each do |name, args, _column, _scope|
         send(:"#{name}_callback", object, *args)
@@ -48,6 +70,16 @@ module RedmineImporter
 
     private
 
+    def diagnostic_key?(key)
+      @diagnostic_values.include?(display_value(key))
+    end
+
+    def diagnostic(event, payload)
+      @diagnostic_logger&.call(event, payload)
+    rescue StandardError
+      nil
+    end
+
     # Strips the scope part of the key for the messages
     def display_value(key)
       key.to_s.split(KEY_SEPARATOR).first
@@ -56,6 +88,14 @@ module RedmineImporter
     # Callback: Sets parent for a previously imported issue.
     def set_parent_callback(parent_issue, child_unique_value)
       child_issue = @issue_cache[child_unique_value]
+      if diagnostic_key?(child_unique_value)
+        diagnostic('set_parent.begin', {
+          parent_issue_id: parent_issue.id,
+          child_key: child_unique_value,
+          child_issue_id: child_issue&.id,
+          previous_parent_issue_id: child_issue&.parent_issue_id
+        })
+      end
       return unless child_issue
 
       # Reload to get latest version and avoid StaleObjectError
@@ -64,6 +104,15 @@ module RedmineImporter
       unless child_issue.save
         @messages << "Warning: Failed to set parent for issue '#{display_value(child_unique_value)}': " \
                      "#{child_issue.errors.full_messages.join(', ')}"
+      end
+      if diagnostic_key?(child_unique_value)
+        diagnostic('set_parent.result', {
+          parent_issue_id: parent_issue.id,
+          child_key: child_unique_value,
+          child_issue_id: child_issue.id,
+          saved: child_issue.errors.empty?,
+          errors: child_issue.errors.full_messages
+        })
       end
     end
 

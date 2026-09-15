@@ -2,6 +2,26 @@
   <%= stylesheet_link_tag 'importer', :plugin => 'redmine_importer' %>
 <% end %>
 
+<% if @diagnostic_events.present? %>
+  <script>
+    (function(events) {
+      window.redmineImporterDiagnostics = events;
+      if (!window.console) { return; }
+
+      if (console.groupCollapsed) {
+        console.groupCollapsed('[redmine_importer_diag] ' + events.length + ' events');
+      }
+      events.forEach(function(entry) {
+        console.warn('[redmine_importer_diag] ' + entry.event, entry.payload);
+      });
+      if (console.groupEnd) { console.groupEnd(); }
+      console.info(
+        '[redmine_importer_diag] Полный массив: window.redmineImporterDiagnostics'
+      );
+    })(<%= raw json_escape(@diagnostic_events.to_json) %>);
+  </script>
+<% end %>
+
 <h2><%= l(:label_import_result) %></h2>
 
 <p><%= l(:label_result_notice,

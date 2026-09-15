@@ -86,6 +86,12 @@ class ImporterController < ApplicationController
   # range the ids span.
   RESULT_ISSUE_LIST_LINK_LIMIT = 300
 
+  # Temporary, narrowly-scoped diagnostics for a collision reported during an
+  # upsert import. Remove this constant and the diagnostic_* calls once the log
+  # from the failing import has been collected.
+  DIAGNOSTIC_UNIQUE_VALUES = %w[000.0000.000 003.0006.201].freeze
+  DIAGNOSTIC_EVENT_LIMIT = 2000
+
   def index; end
 
   def match
@@ -388,6 +394,10 @@ class ImporterController < ApplicationController
     # if error is full, NOP
     return if flash[:error].present?
 
+    @diagnostic_unique_field = unique_field
+    @diagnostic_unique_attr = unique_attr
+    diagnostic_log_configuration
+
     csv_opt = csv_options(iip)
 
     # Parse once into rows shared by bulk matching and the write/delete pass.
@@ -418,6 +428,7 @@ class ImporterController < ApplicationController
       begin
         normalize_row(row)
         count_ragged_row(row)
+        diagnostic_log('row.begin', diagnostic_row_payload(row)) if diagnostic_row?(row)
 
         issue = Issue.new
         issue.notify = false
@@ -481,6 +492,11 @@ class ImporterController < ApplicationController
       begin
         issue, journal = handle_issue_update(issue, row, author, status, update_other_project, journal_field,
                                              unique_attr, unique_field, ignore_non_exist, update_issue)
+        if diagnostic_row?(row)
+          diagnostic_log('row.match_result', diagnostic_row_payload(row).merge(
+            issue: diagnostic_issue_payload(issue, unique_attr)
+          ))
+        end
 
         # What the issue holds before the row is applied to it. Compared
         # against the same reading afterwards to tell a row that changes
@@ -494,6 +510,11 @@ class ImporterController < ApplicationController
         handle_parent_issues(issue, row, ignore_non_exist, unique_attr, unique_field)
         handle_custom_fields(add_versions, issue, project, row)
         handle_watchers(issue, row, watchers)
+        if diagnostic_row?(row)
+          diagnostic_log('row.after_assignment', diagnostic_row_payload(row).merge(
+            issue: diagnostic_issue_payload(issue, unique_attr)
+          ))
+        end
       rescue RowFailed
         next
       rescue ActiveRecord::RecordNotFound
@@ -528,11 +549,26 @@ class ImporterController < ApplicationController
       end
 
       if issue_saved
+        if diagnostic_row?(row)
+          diagnostic_log('row.save_result', diagnostic_row_payload(row).merge(
+            saved: true,
+            created: issue_created,
+            unchanged: issue_unchanged,
+            issue: diagnostic_issue_payload(issue, unique_attr)
+          ))
+        end
         record_imported_issue(issue, issue_created) unless issue_unchanged
 
         if unique_field
           row_key = unique_attr_cache_key(row[unique_field], row)
           if row_key
+            if diagnostic_cache_key?(row_key)
+              diagnostic_log('row_cache.write', diagnostic_row_payload(row).merge(
+                key: row_key,
+                previous_issue: diagnostic_issue_payload(@issue_by_unique_attr[row_key], unique_attr),
+                new_issue: diagnostic_issue_payload(issue, unique_attr)
+              ))
+            end
             @issue_by_unique_attr[row_key] = issue
             @deferred_callbacks.execute(row_key, issue)
           else
@@ -611,6 +647,15 @@ class ImporterController < ApplicationController
         @handle_count += 1
 
       else
+        if diagnostic_row?(row)
+          diagnostic_log('row.save_result', diagnostic_row_payload(row).merge(
+            saved: false,
+            created: issue_created,
+            unchanged: issue_unchanged,
+            errors: issue.errors.full_messages,
+            issue: diagnostic_issue_payload(issue, unique_attr)
+          ))
+        end
         number = record_failure(row)
         add_failure_reason(number, l(:warning_validation_errors, issue_num: number))
         issue.errors.each do |attr, error_message|
@@ -898,6 +943,108 @@ class ImporterController < ApplicationController
      issue.custom_field_values.map do |value|
        [value.custom_field_id, Array(value.value).map(&:to_s).sort]
      end.sort]
+  end
+
+  # Diagnostic helpers intentionally rescue every error: collecting evidence
+  # must not turn a successful import into a failed one.
+  def diagnostic_value?(value)
+    DIAGNOSTIC_UNIQUE_VALUES.include?(value.to_s.strip)
+  end
+
+  def diagnostic_cache_key?(key)
+    value = key.to_s.split(RedmineImporter::DeferredCallbacks::KEY_SEPARATOR, 2).first
+    diagnostic_value?(value)
+  end
+
+  def diagnostic_row?(row)
+    @diagnostic_unique_field.present? && diagnostic_value?(row[@diagnostic_unique_field])
+  rescue StandardError
+    false
+  end
+
+  def diagnostic_log(event, payload = {})
+    @diagnostic_events ||= []
+    return if @diagnostic_events.size >= DIAGNOSTIC_EVENT_LIMIT
+
+    @diagnostic_events << { event: event.to_s, payload: payload }
+  rescue StandardError
+    nil
+  end
+
+  def diagnostic_log_configuration
+    diagnostic_log('configuration', {
+      project_id: @project.id,
+      user_id: User.current.id,
+      unique_column: @diagnostic_unique_field,
+      unique_attr: @diagnostic_unique_attr,
+      extraction: @unique_value_extraction,
+      requested_scope_fields: Array(params[:unique_scope_fields]).reject(&:blank?),
+      tracker_scope_enabled: params[:unique_scope_tracker].present?,
+      scope_fields: Array(@unique_scope_fields).map do |field|
+        custom_field = field[:custom_field]
+        {
+          name: field[:name],
+          filter: field[:filter],
+          column: field[:column],
+          tracker: field[:tracker] == true,
+          default: field[:default],
+          custom_field_id: custom_field&.id,
+          format: custom_field&.field_format,
+          multiple: custom_field&.multiple
+        }
+      end
+    })
+  end
+
+  def diagnostic_row_payload(row, row_number: @processed_rows)
+    {
+      row_number: row_number,
+      unique_column: @diagnostic_unique_field,
+      raw_unique_value: row[@diagnostic_unique_field],
+      subject: fetch('standard_field-subject', row).to_s[0, 200],
+      cache_key: unique_attr_cache_key(row[@diagnostic_unique_field], row),
+      scope_filters: unique_scope_filters(row),
+      scope_cells: Array(@unique_scope_fields).map do |field|
+        {
+          name: field[:name],
+          filter: field[:filter],
+          column: field[:column],
+          raw_value: row[field[:column]]
+        }
+      end
+    }
+  rescue StandardError => e
+    { row_number: row_number, diagnostic_payload_error: "#{e.class}: #{e.message}" }
+  end
+
+  def diagnostic_issue_payload(issue, unique_attr = @diagnostic_unique_attr)
+    return nil if issue.nil?
+
+    {
+      id: issue.id,
+      object_id: issue.object_id,
+      new_record: issue.new_record?,
+      persisted: issue.persisted?,
+      project_id: issue.project_id,
+      tracker_id: issue.tracker_id,
+      parent_issue_id: issue.parent_issue_id,
+      subject: issue.subject.to_s[0, 200],
+      unique_value: issue_field_value(issue, unique_attr),
+      scope_values: Array(@unique_scope_fields).map do |field|
+        value = if field[:tracker]
+                  issue.tracker_id
+                else
+                  issue.custom_field_value(field[:custom_field].id)
+                end
+        { filter: field[:filter], value: value }
+      end,
+      lookup_keys: issue_lookup_cache_keys(issue, unique_attr)
+    }
+  rescue StandardError => e
+    {
+      id: issue.respond_to?(:id) ? issue.id : nil,
+      diagnostic_payload_error: "#{e.class}: #{e.message}"
+    }
   end
 
   def translate_unique_attr(unique_field, unique_attr)
@@ -1403,7 +1550,9 @@ class ImporterController < ApplicationController
     # Deferred callbacks for resolving forward references in CSV
     @deferred_callbacks = RedmineImporter::DeferredCallbacks.new(
       issue_cache: @issue_by_unique_attr,
-      messages: @messages
+      messages: @messages,
+      diagnostic_values: DIAGNOSTIC_UNIQUE_VALUES,
+      diagnostic_logger: ->(event, payload) { diagnostic_log("deferred.#{event}", payload) }
     )
   end
 
@@ -1641,6 +1790,9 @@ class ImporterController < ApplicationController
   end
 
   def log_failure(row, msg)
+    if diagnostic_row?(row)
+      diagnostic_log('row.failure', diagnostic_row_payload(row).merge(message: msg.to_s))
+    end
     add_failure_reason(record_failure(row), msg)
   end
 
@@ -1884,11 +2036,23 @@ class ImporterController < ApplicationController
     return if unique_attr.blank? || unique_field.blank? || csv_internal_ids?
 
     lookups = {}
-    rows.each do |row|
+    rows.each_with_index do |row, index|
       next unless matchable_row?(row, unique_field)
 
       key = unique_attr_cache_key(row[unique_field], row)
-      lookups[key] ||= { value: row[unique_field], row: row } if key
+      if key
+        if diagnostic_cache_key?(key) && lookups.key?(key)
+          diagnostic_log('warm_lookup.key_collision', {
+            key: key,
+            kept_row: diagnostic_row_payload(
+              lookups[key][:row],
+              row_number: lookups[key][:row_number]
+            ),
+            discarded_row: diagnostic_row_payload(row, row_number: index + 1)
+          })
+        end
+        lookups[key] ||= { value: row[unique_field], row: row, row_number: index + 1 }
+      end
     end
     return if lookups.empty?
 
@@ -1934,6 +2098,21 @@ class ImporterController < ApplicationController
 
         @issue_lookup_results[key] << issue unless @issue_lookup_results[key].any? { |found| found.id == issue.id }
       end
+    end
+
+    lookups.each do |key, lookup|
+      next unless diagnostic_cache_key?(key)
+
+      diagnostic_log('warm_lookup.result', {
+        key: key,
+        row_number: lookup[:row_number],
+        raw_unique_value: lookup[:value],
+        scope_filters: unique_scope_filters(lookup[:row]),
+        candidate_count: @issue_lookup_results[key].size,
+        candidates: @issue_lookup_results[key].map do |issue|
+          diagnostic_issue_payload(issue, unique_attr)
+        end
+      })
     end
 
     return unless extract_unique_value?
@@ -2152,6 +2331,7 @@ class ImporterController < ApplicationController
   # Returns the issue object associated with the given value of the given attribute.
   # Raises NoIssueForUniqueValue if not found or MultipleIssuesForUniqueValue
   def issue_for_unique_attr(unique_attr, attr_value, row_data, reference: false)
+    diagnostic = diagnostic_value?(attr_value)
     lookup_value = extract_unique_value(attr_value, reference: reference)
     if lookup_value.nil?
       raise NoIssueForUniqueValue,
@@ -2160,21 +2340,46 @@ class ImporterController < ApplicationController
     end
 
     cache_key = unique_attr_cache_key(attr_value, row_data, reference: reference)
+    if diagnostic
+      diagnostic_log('lookup.begin', {
+        row_number: @processed_rows,
+        reference: reference,
+        unique_attr: unique_attr,
+        raw_value: attr_value,
+        lookup_value: lookup_value,
+        cache_key: cache_key,
+        scope_filters: unique_scope_filters(row_data)
+      })
+    end
     if @issue_by_unique_attr.key?(cache_key)
-      return @issue_by_unique_attr[cache_key]
+      cached_issue = @issue_by_unique_attr[cache_key]
+      if diagnostic
+        diagnostic_log('lookup.hit', {
+          row_number: @processed_rows,
+          reference: reference,
+          source: 'row_cache',
+          cache_key: cache_key,
+          issue: diagnostic_issue_payload(cached_issue, unique_attr)
+        })
+      end
+      return cached_issue
     end
 
     if @issue_lookup_results.key?(cache_key)
+      lookup_source = 'warm_lookup_cache'
       issues = @issue_lookup_results[cache_key]
     elsif use_issue_id && @unique_attr_is_issue_id
+      lookup_source = 'issue_id'
       unless attr_value.to_s.match?(/\A\d+\z/)
         raise NoIssueForUniqueValue,
           "Value '#{attr_value}' is not a valid issue id"
       end
       issues = [Issue.find_by_id(attr_value)].compact
     elsif extract_unique_value?
+      lookup_source = 'extracted_query'
       issues = issues_by_extracted_value(unique_attr, lookup_value, row_data)
     else
+      lookup_source = 'sql_query'
       query = build_unique_query(unique_attr, '=', attr_value, row_data)
 
       # No eager loading here: this runs once per row, and preloading seven
@@ -2185,16 +2390,43 @@ class ImporterController < ApplicationController
     end
 
     if issues.size > 1
+      if diagnostic
+        diagnostic_log('lookup.multiple', {
+          row_number: @processed_rows,
+          reference: reference,
+          source: lookup_source,
+          cache_key: cache_key,
+          issue_ids: issues.map(&:id)
+        })
+      end
       # counting and message are on a caller side
       error = MultipleIssuesForUniqueValue.new("Unique field #{unique_attr} with" \
         " value '#{lookup_value}'#{scope_description(row_data)} has duplicate record")
       error.issue_ids = issues.map(&:id)
       raise error
     elsif issues.empty? || issues[0].nil?
+      if diagnostic
+        diagnostic_log('lookup.miss', {
+          row_number: @processed_rows,
+          reference: reference,
+          source: lookup_source,
+          cache_key: cache_key
+        })
+      end
       raise NoIssueForUniqueValue,
         "No issue with #{unique_attr} of '#{lookup_value}'#{scope_description(row_data)} found"
     else
-      issues.first
+      selected_issue = issues.first
+      if diagnostic
+        diagnostic_log('lookup.hit', {
+          row_number: @processed_rows,
+          reference: reference,
+          source: lookup_source,
+          cache_key: cache_key,
+          issue: diagnostic_issue_payload(selected_issue, unique_attr)
+        })
+      end
+      selected_issue
     end
   end
 
