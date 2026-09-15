@@ -159,3 +159,18 @@ display: inline-block;
 }
 
 .importer-result-summary li a { margin-left: 4px; }
+
+/* The mode of the import and the note column line up with the other
+   drop-downs of the rules */
+#journal_field_wrapper { margin: 6px 0; }
+
+/* A hint explaining several things at once lists them */
+.importer-hint .importer-hint-text ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+.importer-hint .importer-hint-text li { margin: 2px 0; }
+
+/* Why a row failed, next to the row itself */
+td.importer-failure-reason { max-width: 30em; }

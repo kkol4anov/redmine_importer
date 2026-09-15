@@ -2,6 +2,53 @@
   <%= stylesheet_link_tag 'importer', :plugin => 'redmine_importer' %>
 <% end %>
 
+<% if @diagnostic_events.present? %>
+  <script>
+    (function(events) {
+      window.redmineImporterDiagnostics = events;
+      if (!window.console) { return; }
+
+      if (console.groupCollapsed) {
+        console.groupCollapsed('[redmine_importer_diag] ' + events.length + ' events');
+      }
+      events.forEach(function(entry) {
+        console.warn('[redmine_importer_diag] ' + entry.event, entry.payload);
+      });
+      if (console.groupEnd) { console.groupEnd(); }
+      console.info(
+        '[redmine_importer_diag] Полный массив: window.redmineImporterDiagnostics'
+      );
+    })(<%= raw json_escape(@diagnostic_events.to_json) %>);
+  </script>
+<% end %>
+
+<% if @file_validation_failed %>
+  <h2><%= I18n.t(:label_import_file_validation, default: 'Проверка файла импорта') %></h2>
+  <p><%= I18n.t(:text_import_file_validation_failed,
+                default: 'Импорт не выполнялся: обнаружены повторяющиеся составные ключи. Ни одна задача не была создана или изменена.') %></p>
+
+  <h3><%= I18n.t(:label_duplicate_csv_rows, default: 'Повторяющиеся строки CSV') %></h3>
+  <table class="list importer-result-rows">
+    <thead>
+      <tr>
+        <th><%= I18n.t(:label_csv_data_row, default: 'Строка данных CSV') %></th>
+        <th><%= I18n.t(:label_csv_unique_value, default: 'Уникальное значение') %></th>
+        <th><%= l(:field_subject) %></th>
+        <th><%= l(:label_result_failed_reason) %></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @file_validation_results.each do |result| %>
+        <tr class="<%= cycle('odd', 'even') %>">
+          <td><%= result[:row_number] %></td>
+          <td><%= force_utf8(result[:unique_value]) if result[:unique_value].is_a?(String) %></td>
+          <td><%= force_utf8(result[:subject]) if result[:subject].is_a?(String) %></td>
+          <td class="importer-failure-reason"><%= result[:reason] %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
 <h2><%= l(:label_import_result) %></h2>
 
 <p><%= l(:label_result_notice,
@@ -10,17 +57,55 @@
 </p>
 
 <ul class="importer-result-summary">
-  <li>
-    <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
-    <%= imported_issues_link(@created_issue_ids) %>
-  </li>
-  <li>
-    <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
-    <%= imported_issues_link(@updated_issue_ids) %>
-  </li>
+  <% if @delete_mode %>
+    <%# The issues are gone, so there is nothing left to link to %>
+    <li><%= l(:label_result_deleted, :count => Array(@deleted_issue_ids).size) %></li>
+  <% else %>
+    <li>
+      <%= l(:label_result_created, :count => Array(@created_issue_ids).size) %>
+      <%= imported_issues_link(@created_issue_ids) %>
+    </li>
+    <li>
+      <%= l(:label_result_updated, :count => Array(@updated_issue_ids).size) %>
+      <%= imported_issues_link(@updated_issue_ids) %>
+    </li>
+    <li><%= l(:label_result_unchanged, :count => @unchanged_count.to_i) %></li>
+  <% end %>
   <li><%= l(:label_result_skipped, :count => @skip_count.to_i) %></li>
   <li><%= l(:label_result_errors, :count => @failed_count.to_i) %></li>
 </ul>
+
+<h3><%= l(:label_result_rows) %></h3>
+<% if @row_results.blank? %>
+  <p><%= l(:label_result_rows_none) %></p>
+<% else %>
+  <table class="list importer-result-rows">
+    <thead>
+      <tr>
+        <th><%= l(:label_result_status) %></th>
+        <th><%= l(:field_issue) %></th>
+        <th><%= l(:field_subject) %></th>
+        <th><%= l(:label_result_failed_reason) %></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @row_results.each do |result| %>
+        <tr class="<%= cycle('odd', 'even') %>">
+          <td><%= l("label_import_result_#{result[:status]}".to_sym) %></td>
+          <td>
+            <% if result[:issue_id].present? && %i[created updated unchanged].include?(result[:status]) %>
+              <%= link_to "##{result[:issue_id]}", issue_path(result[:issue_id]) %>
+            <% elsif result[:issue_id].present? %>
+              #<%= result[:issue_id] %>
+            <% end %>
+          </td>
+          <td><%= force_utf8(result[:subject]) if result[:subject].is_a?(String) %></td>
+          <td class="importer-failure-reason"><%= safe_join(Array(result[:reasons]), content_tag(:br)) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>
 
 <p><%= l(:label_result_projects) %>
   <br/>
@@ -31,9 +116,14 @@
   <% end %>
 </p>
 
-<% if not @messages.empty? %>
-  <hr/>
-  <h3><%= l(:label_result_messages) %></h3>
+<%# The page keeps its shape whether the run went through or not: the same
+    sections in the same order, so that a good result is not read by its
+    silence. Only what stands in them changes. %>
+<hr/>
+<h3><%= l(:label_result_messages) %></h3>
+<% if @messages.blank? %>
+  <p><%= l(:label_result_messages_none) %></p>
+<% else %>
   <ul>
     <% @messages.each do |m| %>
       <li><%= m %></li>
@@ -42,14 +132,17 @@
 <% end %>
 
 <hr/>
-<% if @failed_count > 0 %>
-  <h3><%= l(:label_result_failed, @failed_count) %></h3>
+<h3><%= l(:label_result_failed, @failed_count.to_i) %></h3>
+<% if @failed_count.to_i.zero? %>
+  <p><%= l(:label_result_failed_none) %></p>
+<% else %>
   <table class="list">
     <thead>
       <tr>
         <th>#</th>
+        <th><%= l(:label_result_failed_reason) %></th>
         <% @headers.each do |column| %>
-          <th><%= column.unpack('U*').pack('U*')  %></th>
+          <th><%= force_utf8(column) %></th>
         <% end %>
       </tr>
     </thead>
@@ -57,13 +150,21 @@
       <% @failed_issues.each do |id, issue| -%>
         <tr class="<%= cycle("odd", "even") %>">
           <td><%= id %></td>
+          <td class="importer-failure-reason">
+            <%# Every reason sits next to the row it is about, instead of
+                being lost among the messages of the other rows. %>
+            <% Array(@failure_reasons[id]).each do |reason| %>
+              <%= reason %><br/>
+            <% end %>
+          </td>
           <% issue.each do |column| %>
             <%- data = column[1] -%>
-            <%- data = data.unpack('U*').pack('U*') if data.is_a?(String) -%>
+            <%- data = force_utf8(data) if data.is_a?(String) -%>
             <%= content_tag 'td', data %>
           <% end %>
         </tr>
       <% end %>
     </tbody>
   </table>
+<% end %>
 <% end %>
