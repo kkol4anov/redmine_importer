@@ -570,17 +570,29 @@
         data: new FormData(form),
         processData: false,
         contentType: false,
-        dataType: 'html',
+        dataType: 'json',
         global: false
-      }).done(function(html) {
+      }).done(function(response) {
         importCompleted = true;
         importRunning = false;
         stopProgressPolling();
         window.removeEventListener('pagehide', requestCancellation);
         window.history.replaceState(null, '', form.action);
-        document.open();
-        document.write(html);
-        document.close();
+        // Discard scripts, including the optional diagnostic patch's inline
+        // script. Shared assets and rails-ujs must not be evaluated again.
+        var nodes = $.parseHTML(response.html, document, false);
+        $('#content').empty().append(nodes);
+        (response.errors || []).forEach(function(message) {
+          $('<div class="flash error"></div>').text(message).prependTo('#content');
+        });
+        window.redmineImporterDiagnostics = response.diagnostics || [];
+        if (window.console && window.redmineImporterDiagnostics.length) {
+          console.groupCollapsed('[redmine_importer_diag]');
+          window.redmineImporterDiagnostics.forEach(function(entry) {
+            console.warn('[redmine_importer_diag] ' + entry.event, entry.payload);
+          });
+          console.groupEnd();
+        }
       }).fail(function(_xhr, status) {
         if (status === 'abort') { return; }
         importRunning = false;

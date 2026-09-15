@@ -72,6 +72,18 @@ class ImporterControllerTest < ActionController::TestCase
     assert_equal @user.today, @issue.start_date
   end
 
+  test 'ajax result returns a fragment without application assets' do
+    @controller.send(:init_globals)
+    @controller.stubs(:run_import)
+    @controller.stubs(:finish_progress)
+    post :result, params: { project_id: @project.identifier }, xhr: true
+    assert_response :success
+    payload = JSON.parse(response.body)
+    assert payload.key?('html')
+    assert_equal [], payload['diagnostics']
+    refute_match(/<html|rails-ujs|jquery-3/i, payload['html'])
+  end
+
   test 'should reject csv exceeding row limit' do
     # Set max row limit to 2
     Setting.stubs(:plugin_redmine_importer).returns({ 'max_csv_rows' => '2' })

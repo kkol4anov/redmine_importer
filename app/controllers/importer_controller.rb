@@ -178,15 +178,31 @@ class ImporterController < ApplicationController
   def result
     run_import
     finish_progress
+    render_import_response
   rescue ImportCancelled
     @cancelled = true
     @messages << l(:notice_import_cancelled)
     finalize_import if @import_started_at
     finish_progress(cancelled: true)
+    render_import_response
   rescue StandardError
     finish_progress(failed: true)
     raise
   end
+
+  # Return data and the report fragment, never the application layout/assets.
+  # Ordinary navigation retains the normal full-page rendering.
+  def render_import_response
+    return unless request.xhr?
+    return if performed?
+
+    render json: {
+      html: render_to_string(template: 'importer/result', layout: false),
+      diagnostics: @diagnostic_events || [],
+      errors: Array(flash[:error]).map(&:to_s)
+    }
+  end
+  private :render_import_response
 
   # The state of the import the browser is waiting for, polled while the
   # request performing it is still running.
