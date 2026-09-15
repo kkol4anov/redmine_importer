@@ -405,6 +405,10 @@ class ImporterController < ApplicationController
     # avoids reparsing the file for each phase.
     rows = csv_rows(iip, csv_opt)
     @total_rows = rows.size
+    if update_issue && duplicate_csv_keys?(rows, unique_field)
+      finalize_import
+      return
+    end
     warm_issue_lookup_cache(rows, unique_attr, unique_field) if update_issue || delete_issues
     if delete_issues
       run_delete(rows, unique_attr, unique_field, ignore_non_exist,
@@ -2026,6 +2030,68 @@ class ImporterController < ApplicationController
 
   def csv_rows(iip, csv_opt)
     CSV.new(iip.csv_data, **csv_opt).map { |row| normalize_row(row) }
+  end
+
+  # Validate before any issue/category/version writes. Row numbers exclude the
+  # header and count CSV records, not physical lines (cells may contain LF).
+  def duplicate_csv_keys?(rows, unique_field)
+    return false if unique_field.blank?
+
+    grouped_rows = Hash.new { |hash, key| hash[key] = [] }
+    rows.each_with_index do |row, index|
+      next unless matchable_row?(row, unique_field)
+
+      key = unique_attr_cache_key(row[unique_field], row)
+      next if key.nil?
+
+      grouped_rows[key] << { row: row, number: index + 1 }
+    end
+
+    duplicate_groups = grouped_rows.values.select { |entries| entries.size > 1 }
+    return false if duplicate_groups.empty?
+
+    @file_validation_failed = true
+    @file_validation_results = []
+    duplicate_groups.each do |entries|
+      numbers = entries.map { |entry| entry[:number] }.join(', ')
+      first_row = entries.first[:row]
+      reason = duplicate_csv_translation(
+        :error_csv_duplicate_key,
+        ru: "Строки данных %{rows} имеют одинаковый составной ключ: '%{value}'%{scope_text}.",
+        en: "Data rows %{rows} have the same composite key: '%{value}'%{scope_text}.",
+        rows: numbers,
+        value: first_row[unique_field],
+        scope_text: scope_description(first_row)
+      )
+
+      entries.each do |entry|
+        log_failure(entry[:row], reason)
+        @file_validation_results << {
+          row_number: entry[:number],
+          unique_value: entry[:row][unique_field],
+          subject: result_row_value(entry[:row], 'standard_field-subject'),
+          reason: reason
+        }
+      end
+    end
+
+    duplicate_rows = @file_validation_results.size
+    @messages << duplicate_csv_translation(
+      :error_csv_duplicate_keys_abort,
+      ru: 'Импорт не начат: групп повторяющихся ключей — %{groups}, строк в них — %{rows}. Задачи не изменены.',
+      en: 'Import not started: %{groups} duplicate-key groups containing %{rows} rows. No issues changed.',
+      groups: duplicate_groups.size,
+      rows: duplicate_rows
+    )
+    true
+  end
+
+  # The fallback is intentional: plugin locale files are cached by some
+  # Redmine installations, and a newly added key must never be shown as
+  # "translation missing" on this safety-critical report.
+  def duplicate_csv_translation(key, ru:, en:, **options)
+    fallback = I18n.locale.to_s.start_with?('ru') ? ru : en
+    I18n.t(key, **options.merge(default: fallback))
   end
 
   # Resolves all row identifiers in a handful of queries before writes begin.

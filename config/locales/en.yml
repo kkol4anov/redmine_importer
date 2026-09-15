@@ -1,4 +1,11 @@
 en:
+  error_csv_duplicate_key: "Data rows %{rows} have the same composite key: '%{value}'%{scope_text}."
+  error_csv_duplicate_keys_abort: "Import not started: %{groups} duplicate-key groups containing %{rows} rows. No issues changed."
+  label_import_file_validation: "Import file validation"
+  label_duplicate_csv_rows: "Duplicate CSV rows"
+  label_csv_data_row: "CSV data row"
+  label_csv_unique_value: "Unique value"
+  text_import_file_validation_failed: "The import was not run because duplicate composite keys were found. No issue was created or changed."
   label_import: "Import"
   label_issue_importer: "Issue Importer"
   label_upload_notice: "Select a CSV file to import. Import file must have a header row. Maximum size 4MB."

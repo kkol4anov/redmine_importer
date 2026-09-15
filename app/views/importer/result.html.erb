@@ -22,6 +22,33 @@
   </script>
 <% end %>
 
+<% if @file_validation_failed %>
+  <h2><%= I18n.t(:label_import_file_validation, default: 'Проверка файла импорта') %></h2>
+  <p><%= I18n.t(:text_import_file_validation_failed,
+                default: 'Импорт не выполнялся: обнаружены повторяющиеся составные ключи. Ни одна задача не была создана или изменена.') %></p>
+
+  <h3><%= I18n.t(:label_duplicate_csv_rows, default: 'Повторяющиеся строки CSV') %></h3>
+  <table class="list importer-result-rows">
+    <thead>
+      <tr>
+        <th><%= I18n.t(:label_csv_data_row, default: 'Строка данных CSV') %></th>
+        <th><%= I18n.t(:label_csv_unique_value, default: 'Уникальное значение') %></th>
+        <th><%= l(:field_subject) %></th>
+        <th><%= l(:label_result_failed_reason) %></th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @file_validation_results.each do |result| %>
+        <tr class="<%= cycle('odd', 'even') %>">
+          <td><%= result[:row_number] %></td>
+          <td><%= force_utf8(result[:unique_value]) if result[:unique_value].is_a?(String) %></td>
+          <td><%= force_utf8(result[:subject]) if result[:subject].is_a?(String) %></td>
+          <td class="importer-failure-reason"><%= result[:reason] %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
 <h2><%= l(:label_import_result) %></h2>
 
 <p><%= l(:label_result_notice,
@@ -139,4 +166,5 @@
       <% end %>
     </tbody>
   </table>
+<% end %>
 <% end %>

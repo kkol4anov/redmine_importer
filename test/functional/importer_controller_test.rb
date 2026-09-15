@@ -7,6 +7,28 @@ class ImporterControllerTest < ActionController::TestCase
 
   fixtures :users
 
+  test 'duplicate preflight rejects equal keys and reports both row numbers' do
+    @controller.send(:init_globals)
+    @controller.instance_variable_set(:@attrs_map, {})
+    rows = CSV.parse("code,scope\nA,one\nA,one\n", headers: true)
+    @controller.stubs(:unique_attr_cache_key).returns('A/one')
+    assert @controller.send(:duplicate_csv_keys?, rows, 'code')
+    assert_equal 2, @controller.instance_variable_get(:@failed_count)
+    assert_equal [1, 2],
+                 @controller.instance_variable_get(:@file_validation_results).map { |result| result[:row_number] }
+    assert @controller.instance_variable_get(:@file_validation_failed)
+    assert_equal 1, @controller.instance_variable_get(:@messages).size
+  end
+
+  test 'duplicate preflight accepts different scope keys' do
+    @controller.send(:init_globals)
+    rows = CSV.parse("code,scope\nA,one\nA,two\n", headers: true)
+    @controller.stubs(:unique_attr_cache_key).with('A', rows[0]).returns('A/one')
+    @controller.stubs(:unique_attr_cache_key).with('A', rows[1]).returns('A/two')
+    refute @controller.send(:duplicate_csv_keys?, rows, 'code')
+    assert_equal 0, @controller.instance_variable_get(:@failed_count)
+  end
+
   def setup
     ActionController::Base.allow_forgery_protection = false
     @project = Project.create! name: 'foo', identifier: 'importer_controller_test'

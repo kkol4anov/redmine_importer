@@ -1,4 +1,11 @@
 ru:
+  error_csv_duplicate_key: "Строки данных %{rows} имеют одинаковый составной ключ: '%{value}'%{scope_text}."
+  error_csv_duplicate_keys_abort: "Импорт не начат: групп повторяющихся ключей — %{groups}, строк в них — %{rows}. Задачи не изменены."
+  label_import_file_validation: "Проверка файла импорта"
+  label_duplicate_csv_rows: "Повторяющиеся строки CSV"
+  label_csv_data_row: "Строка данных CSV"
+  label_csv_unique_value: "Уникальное значение"
+  text_import_file_validation_failed: "Импорт не выполнялся: обнаружены повторяющиеся составные ключи. Ни одна задача не была создана или изменена."
   label_import: "Импорт"
   label_issue_importer: "Импорт задач"
   label_upload_notice: "Выберите CSV файл для импорта. Импортируемый файл должен иметь заголовки колонок. Максимальный размер - 4MB."
