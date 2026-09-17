@@ -25,7 +25,7 @@ To install:
 - Enable "Importer"
 
 en, de, zh, pt-BR, ru and ja localizations included.
-The other localizations are up to date, but the zh is a little bit behind.
+The ru and en localizations are up to date, but the others are out of date.
 If anyone could update it, it would be appreciated.
 
 User documentation at https://github.com/leovitch/redmine_importer/wiki.
@@ -35,4 +35,3 @@ blank to import the first sheet, or enter its exact name. The first non-empty
 row supplies column headers. Blank rows are skipped. Formula results must be
 calculated and saved in Excel/LibreOffice before uploading. Merged cells are
 rejected. Existing mapping, import modes and row limits apply to both formats.
-See doc/xlsx-import-ru.md for installation, conversion rules and limitations.
