@@ -1,11 +1,50 @@
 # frozen_string_literal: true
 
 require File.expand_path('../test_helper', __dir__)
+require_relative '../support/xlsx_fixture'
 
 class ImporterControllerTest < ActionController::TestCase
   include ActiveJob::TestHelper
+  include XlsxFixture
 
   fixtures :users
+
+  test 'xlsx upload uses canonical csv options and imports through existing result action' do
+    rows = '<row r="1">' + text_cell('A1', 'Subject') + '</row><row r="2">' + text_cell('A2', 'XLSX imported issue') + '</row>'
+    with_xlsx(rows) do |path|
+      post :match, params: {
+        project_id: @project.identifier,
+        file: Rack::Test::UploadedFile.new(path, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+        encoding: 'W', splitter: ';', wrapper: "'"
+      }
+      assert_response :success
+      assert_nil flash[:error]
+      iip = ImportInProgress.find_by!(user_id: @user.id)
+      assert_equal ['U', ',', '"'], [iip.encoding, iip.col_sep, iip.quote_char]
+      assert_equal 'XLSX imported issue', CSV.parse(iip.csv_data, headers: true)[0]['Subject']
+      post :result, params: {
+        project_id: @project.identifier,
+        import_timestamp: iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+        import_mode: 'create', unique_field: 'Subject', default_tracker: @tracker.id,
+        fields_map: { 'Subject' => 'standard_field-subject' }
+      }
+      assert_response :success
+      assert Issue.exists?(subject: 'XLSX imported issue')
+    end
+  end
+
+  test 'xlsx row limit fails before replacing the current import' do
+    Setting.stubs(:plugin_redmine_importer).returns({ 'max_csv_rows' => '1' })
+    rows = '<row r="1">' + text_cell('A1', 'Subject') + '</row>' +
+           '<row r="2">' + text_cell('A2', 'one') + '</row>' +
+           '<row r="3">' + text_cell('A3', 'two') + '</row>'
+    with_xlsx(rows) do |path|
+      post :match, params: { project_id: @project.identifier, file: Rack::Test::UploadedFile.new(path) }
+      assert_redirected_to action: :index, project_id: @project.identifier
+      assert flash[:error].present?
+      assert ImportInProgress.exists?(@iip.id)
+    end
+  end
 
   test 'duplicate preflight rejects equal keys and reports both row numbers' do
     @controller.send(:init_globals)
