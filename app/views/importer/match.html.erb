@@ -212,11 +212,6 @@
       </label>
       <br/>
       <label>
-        <%= check_box_tag "add_versions", true, false %>
-        <%= l(:label_importer_add_versions) %>
-      </label>
-      <br/>
-      <label>
         <%= check_box_tag "clear_empty_cells", true, false %>
         <%= l(:label_clear_empty_cells) %>
       </label>
@@ -331,7 +326,7 @@
       // nothing is written to the issues while they are being deleted, and
       // no user is read out of the file either
       $('#write_options').toggleClass('importer-disabled', deleting);
-      $('#send_emails, #add_categories, #add_versions, #clear_empty_cells, #use_anonymous')
+      $('#send_emails, #add_categories, #clear_empty_cells, #use_anonymous')
         .prop('disabled', deleting);
       $('#use_anonymous_wrapper').toggleClass('importer-disabled', deleting);
 

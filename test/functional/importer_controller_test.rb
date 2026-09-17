@@ -45,6 +45,7 @@ class ImporterControllerTest < ActionController::TestCase
       assert_nil flash[:error]
       assert_select '#import-required-defaults #default_tracker', count: 1
       assert_select '.import-default-panel', minimum: 1
+      assert_select 'input[name=add_versions]', count: 0
       iip = ImportInProgress.find_by!(user_id: @user.id)
       assert_equal ['U', ',', '"'], [iip.encoding, iip.col_sep, iip.quote_char]
       assert_equal 'XLSX imported issue', CSV.parse(iip.csv_data, headers: true)[0]['Subject']
