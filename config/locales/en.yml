@@ -2,7 +2,7 @@ en:
   label_xlsx_sheet: "Worksheet name:"
   text_xlsx_sheet: "Leave blank for the first worksheet. The first non-empty row contains unique column headers. Blank rows are skipped. Formulas use saved results; recalculate and save the workbook before uploading."
   label_xlsx_selected_sheet: "Excel worksheet: %{sheet}"
-  error_import_file_type: "Select a .csv or .xlsx file. Legacy .xls and .xlsm files are not supported."
+  error_import_file_type: "Select a .csv, .txt or .xlsx file. Legacy .xls and .xlsm files are not supported."
   error_xlsx_size: "The XLSX file exceeds the limit: 4 MiB uploaded or converted to CSV, 64 MiB uncompressed, or 2000 archive entries."
   error_xlsx_columns: "The worksheet exceeds the maximum of %{max_columns} columns."
   error_xlsx_headers: "XLSX column headers must be non-empty and unique."

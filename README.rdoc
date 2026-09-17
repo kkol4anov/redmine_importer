@@ -30,7 +30,7 @@ If anyone could update it, it would be appreciated.
 
 User documentation at https://github.com/leovitch/redmine_importer/wiki.
 
-CSV and Excel .xlsx uploads are supported. For Excel, leave the worksheet name
+CSV (including .txt files with delimiters) and Excel .xlsx uploads are supported. For Excel, leave the worksheet name
 blank to import the first sheet, or enter its exact name. The first non-empty
 row supplies column headers. Blank rows are skipped. Formula results must be
 calculated and saved in Excel/LibreOffice before uploading. Merged cells are

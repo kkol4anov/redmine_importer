@@ -103,7 +103,7 @@ class ImporterController < ApplicationController
     end
 
     extension = File.extname(params[:file].original_filename.to_s).downcase
-    unless %w[.csv .xlsx].include?(extension)
+    unless %w[.csv .txt .xlsx].include?(extension)
       flash[:error] = l(:error_import_file_type)
       redirect_to action: :index
       return

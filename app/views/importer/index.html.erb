@@ -4,7 +4,7 @@
   <%= hidden_field_tag 'project_id', @project.id %>
 
   <p><label><%=l(:label_upload_notice)%></label><br/>
-    <%= file_field_tag 'file', :size => 60, :accept => '.csv,.xlsx'%></p>
+    <%= file_field_tag 'file', :size => 60, :accept => '.csv,.txt,.xlsx'%></p>
 
   <fieldset class="box" id="xlsx-options">
     <legend>Excel (.xlsx)</legend>
@@ -13,7 +13,7 @@
       <em><%= l(:text_xlsx_sheet) %></em></p>
   </fieldset>
 
-  <fieldset class="box" id="csv-options"><legend><%= l(:label_upload_format) %> (CSV)</legend>
+  <fieldset class="box" id="csv-options"><legend><%= l(:label_upload_format) %> (CSV / TXT)</legend>
     <p><label><%=l(:label_upload_encoding)%></label>
       <%= select_tag "encoding",
           "<option value=\"W\">Windows-1251 (CP1251)</option>" \
