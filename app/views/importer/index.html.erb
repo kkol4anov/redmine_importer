@@ -4,9 +4,16 @@
   <%= hidden_field_tag 'project_id', @project.id %>
 
   <p><label><%=l(:label_upload_notice)%></label><br/>
-    <%= file_field_tag 'file', :size => 60%></p>
+    <%= file_field_tag 'file', :size => 60, :accept => '.csv,.txt,.xlsx'%></p>
 
-  <fieldset class="box"><legend><%= l(:label_upload_format) %></legend>
+  <fieldset class="box" id="xlsx-options">
+    <legend>Excel (.xlsx)</legend>
+    <p><%= label_tag 'xlsx_sheet', l(:label_xlsx_sheet) %>
+      <%= text_field_tag 'xlsx_sheet', nil, :size => 30 %><br/>
+      <em><%= l(:text_xlsx_sheet) %></em></p>
+  </fieldset>
+
+  <fieldset class="box" id="csv-options"><legend><%= l(:label_upload_format) %> (CSV / TXT)</legend>
     <p><label><%=l(:label_upload_encoding)%></label>
       <%= select_tag "encoding",
           "<option value=\"W\">Windows-1251 (CP1251)</option>" \
@@ -27,6 +34,13 @@
 
 <script type="text/javascript">
   $(document).ready(function() {
+    function updateFileOptions() {
+      var isXlsx = /\.xlsx$/i.test($('#file').val());
+      $('#xlsx-options').toggle(isXlsx).find(':input').prop('disabled', !isXlsx);
+      $('#csv-options').toggle(!isXlsx).find(':input').prop('disabled', isXlsx);
+    }
+    $('#file').on('change', updateFileOptions);
+    updateFileOptions();
     $('#csv-upload-form').on('submit', function() {
       $('#upload-button').prop('disabled', true).css({opacity: '0.65', cursor: 'not-allowed'});
     });

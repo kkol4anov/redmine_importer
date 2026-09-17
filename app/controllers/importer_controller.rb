@@ -3,6 +3,7 @@
 require 'csv'
 require 'securerandom'
 require 'tempfile'
+require_relative '../../lib/redmine_importer/xlsx_reader'
 
 class MultipleIssuesForUniqueValue < RuntimeError
   attr_accessor :issue_ids
@@ -101,6 +102,30 @@ class ImporterController < ApplicationController
       return
     end
 
+    extension = File.extname(params[:file].original_filename.to_s).downcase
+    unless %w[.csv .txt .xlsx].include?(extension)
+      flash[:error] = l(:error_import_file_type)
+      redirect_to action: :index
+      return
+    end
+
+    if extension == '.xlsx'
+      begin
+        reader = RedmineImporter::XlsxReader.new(
+          params[:file].tempfile.path,
+          sheet_name: params[:xlsx_sheet],
+          max_rows: Setting.plugin_redmine_importer['max_csv_rows']
+        )
+        xlsx_data = reader.to_csv
+        @xlsx_sheet_name = reader.sheet_name
+      rescue RedmineImporter::XlsxReader::Error => e
+        options = e.options.transform_values { |value| value.is_a?(String) ? ERB::Util.html_escape(value) : value }
+        flash[:error] = l(e.key, **options)
+        redirect_to action: :index
+        return
+      end
+    end
+
     # Delete existing iip to ensure there can't be two iips for a user
     ImportInProgress.where('user_id = ?', User.current.id).delete_all
     # save import-in-progress data
@@ -109,7 +134,12 @@ class ImporterController < ApplicationController
     iip.col_sep = params[:splitter]
     iip.encoding = params[:encoding]
     iip.created = Time.new
-    if params[:file].present?
+    if xlsx_data
+      iip.csv_data = xlsx_data
+      iip.encoding = 'U'
+      iip.col_sep = ','
+      iip.quote_char = '"'
+    elsif params[:file].present?
       raw_data = params[:file].read
 
       # If user select Windows-1251 encoding (added as 'W')

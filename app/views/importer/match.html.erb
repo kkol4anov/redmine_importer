@@ -3,6 +3,9 @@
 <% end %>
 
 <h2><%= l(:label_match_columns) %></h2>
+<% if @xlsx_sheet_name.present? %>
+  <p><%= l(:label_xlsx_selected_sheet, sheet: @xlsx_sheet_name) %></p>
+<% end %>
 
 <%# The import runs inside the asynchronous request started by the form below.
     The mapping page stays alive until the whole file has been processed, so it

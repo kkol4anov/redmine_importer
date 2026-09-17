@@ -17,6 +17,7 @@ Newer and older versions might work but these haven't been tested so far.
 
 To install:
 - Download the plugin to your 'plugins/' directory.  Be sure to maintain the correct folder name, 'redmine_importer'.
+- Run <code>bundle install</code> from the Redmine root (XLSX support uses Roo 2.10).
 - Run: <code>$ rake redmine:plugins:migrate RAILS_ENV=production</code>
 - Run: <code>$ rake tmp:cache:clear RAILS_ENV=production</code>
 - Restart your redmine: <code>$ touch tmp/restart.txt</code>
@@ -28,3 +29,10 @@ The other localizations are up to date, but the zh is a little bit behind.
 If anyone could update it, it would be appreciated.
 
 User documentation at https://github.com/leovitch/redmine_importer/wiki.
+
+CSV (including .txt files with delimiters) and Excel .xlsx uploads are supported. For Excel, leave the worksheet name
+blank to import the first sheet, or enter its exact name. The first non-empty
+row supplies column headers. Blank rows are skipped. Formula results must be
+calculated and saved in Excel/LibreOffice before uploading. Merged cells are
+rejected. Existing mapping, import modes and row limits apply to both formats.
+See doc/xlsx-import-ru.md for installation, conversion rules and limitations.
