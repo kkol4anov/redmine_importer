@@ -116,23 +116,23 @@ class ImportInProgress < ActiveRecord::Base
 
   private
   def encode_csv_data
-    return if self.csv_data.blank?
+    return if csv_data.blank?
+    return unless new_record? || will_save_change_to_csv_data?
 
-    self.csv_data = self.csv_data
-    # 入力文字コード
-    encode = case self.encoding
-             when "U"
-               "-W"
-             when "EUC"
-               "-E"
-             when "S"
-               "-S"
-             when "N"
-               ""
-             else
-               ""
-             end
-
-    self.csv_data = NKF.nkf("#{encode} -w", self.csv_data).encode('UTF-8', 'UTF-8', invalid: :replace, undef: :replace)
+    # Do not send UTF-8 through NKF's Japanese character normalization.
+    # In particular ASCII ~ and Unicode wave/fullwidth tildes must remain
+    # distinct, and MIME-looking cell contents must remain literal text.
+    source = { 'U' => 'UTF-8', 'UTF-8' => 'UTF-8', 'N' => 'UTF-8',
+               'W' => 'Windows-1251', 'S' => 'Windows-31J',
+               'EUC' => 'EUC-JP' }[encoding]
+    data = csv_data.dup
+    self.csv_data = if source
+                      data.force_encoding(source).encode('UTF-8', invalid: :replace, undef: :replace)
+                    else
+                      NKF.nkf('-w -m0', data)
+                    end
+    # Later saves must not reinterpret the converted bytes as the source
+    # encoding. CSV parsing already uses UTF-8 throughout the importer.
+    self.encoding = 'U'
   end
 end

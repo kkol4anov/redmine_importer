@@ -12,6 +12,26 @@ class ImportInProgressTest < ActiveSupport::TestCase
     User.stubs(:current).returns(@admin)
   end
 
+  test 'UTF-8 preserves all tildes and literal MIME text across saves' do
+    text = "Subject\nASCII ~ / wave 〜 / fullwidth ～ / Кириллица\n=?UTF-8?Q?literal?=\n"
+    iip = ImportInProgress.create!(encoding: 'U', user: @admin,
+                                  created: Time.current, csv_data: text)
+    assert_equal text, iip.reload.csv_data
+    iip.update!(created: Time.current)
+    assert_equal text, iip.reload.csv_data
+  end
+
+  test 'Windows-1251 converts once and preserves ASCII tilde' do
+    text = "Subject\nЗадача ~ 220 В\n"
+    iip = ImportInProgress.create!(encoding: 'W', user: @admin,
+                                  created: Time.current,
+                                  csv_data: text.encode('Windows-1251'))
+    assert_equal text, iip.reload.csv_data
+    iip.update!(created: Time.current)
+    assert_equal text, iip.reload.csv_data
+    assert_equal 'U', iip.encoding
+  end
+
   test 'encode_csv_data stores bytes that are valid UTF-8 regardless of column encoding tag' do
     iip = ImportInProgress.new(encoding: 'U', col_sep: ',', quote_char: '"', created: Time.current, user: @admin)
     iip.csv_data = "id,subject\n1,test\n".force_encoding('ASCII-8BIT')
