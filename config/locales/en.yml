@@ -180,3 +180,7 @@ en:
   label_result_open_issues: "open in the issue list"
   label_result_open_issues_range: "open #%{from}–#%{to} in the issue list"
   text_result_open_issues_range_hint: "Too many issues to list them one by one in the address: the link opens the range they span and may show other issues that fall into it."
+
+  label_import_required_defaults: "Defaults for required fields"
+  text_import_required_defaults: "Fields depend on the tracker, status and your roles. Defaults fill missing columns or empty cells; existing nonempty issue values are preserved. These defaults do not apply to other trackers in the file. Requirements are checked against each issue's actual tracker and status."
+  error_import_required_fields: "Required fields are empty: %{fields}"

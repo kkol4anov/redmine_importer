@@ -65,6 +65,35 @@
     <% end %>
   </fieldset>
 
+  <fieldset class="box" id="import-required-defaults">
+    <legend><%= l(:label_import_required_defaults) %></legend>
+    <p><%= l(:text_import_required_defaults) %></p>
+    <div class="rule-row">
+      <label class="rule-label" for="default_tracker"><%= l(:label_default_tracker) %></label>
+      <%= select_tag "default_tracker",
+        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
+    </div>
+    <% importer_default_panels.each do |panel| %>
+      <% issue = panel[:issue]; prefix = "required_defaults[#{issue.tracker_id}]" %>
+      <div class="import-default-panel tabular" data-tracker="<%= issue.tracker_id %>"
+           data-status="<%= issue.status_id %>" data-requirements="<%= panel[:requirements].to_json %>">
+        <% core = panel[:requirements].values.flat_map(&:first).uniq %>
+        <% custom = panel[:requirements].values.flat_map(&:last).uniq %>
+        <% core.each do |attribute| %>
+          <p data-core="<%= attribute %>">
+            <%= importer_default_core_input(issue, panel[:statuses], prefix, attribute) %>
+          </p>
+        <% end %>
+        <% issue.custom_field_values.each do |value| %>
+          <% next unless custom.include?(value.custom_field_id.to_s) %>
+          <p data-custom="<%= value.custom_field_id %>">
+            <%= importer_default_custom_input(issue, value) %>
+          </p>
+        <% end %>
+      </div>
+    <% end %>
+  </fieldset>
+
   <fieldset class="box">
     <legend><%= l(:label_import_rule) %></legend>
 
@@ -102,11 +131,6 @@
     </span>
     <br/>
 
-    <div class="rule-row">
-      <label class="rule-label" for="default_tracker"><%= l(:label_default_tracker) %></label>
-      <%= select_tag "default_tracker",
-        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
-    </div>
 
     <div id="unique_field_wrapper" class="rule-row">
       <label class="rule-label" for="unique_field"><%= l(:label_unique_field) %></label>
@@ -380,7 +404,30 @@
       }
     }
 
+    function refreshRequiredDefaults() {
+      var tracker = $('#default_tracker').val();
+      $('.import-default-panel').each(function() {
+        var panel = $(this);
+        var active = String(panel.data('tracker')) === String(tracker) && !deleteMode();
+        panel.toggle(active);
+        panel.find(':input').prop('disabled', !active);
+        var status = panel.find('.import-default-status').val() || String(panel.data('status'));
+        var requirements = panel.data('requirements')[status] || [[], []];
+        panel.find('[data-core], [data-custom]').each(function() {
+          var field = $(this);
+          var core = field.attr('data-core');
+          var required = core ? requirements[0].indexOf(core) >= 0 :
+            requirements[1].indexOf(field.attr('data-custom')) >= 0;
+          field.toggle(required);
+          // Defaults are optional: the value may be supplied by the file.
+          field.find(':input').prop('disabled', !active || !required).prop('required', false);
+        });
+      });
+    }
+    $('#default_tracker, .import-default-status').on('change', refreshRequiredDefaults);
+
     function refreshImportRules() {
+      refreshRequiredDefaults();
       toggleIdColumnWarning();
       toggleUniqueMatching();
       toggleModes();
