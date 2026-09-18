@@ -4,6 +4,40 @@ width: 270px;
 display: inline-block;
 }
 
+#import-required-defaults > summary {
+  cursor: pointer;
+  font-weight: bold;
+}
+#import-required-defaults .import-default-row {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 340px);
+  gap: 4px 8px;
+  align-items: start;
+  margin: 6px 0;
+  padding: 0;
+}
+#import-required-defaults .import-default-row > * { grid-column: 2; }
+#import-required-defaults .import-default-row > label:first-child {
+  grid-column: 1;
+  grid-row: 1;
+  float: none;
+  width: auto;
+  margin: 0;
+  text-align: left;
+}
+#import-required-defaults .import-default-row > select,
+#import-required-defaults .import-default-row > input:not([type=checkbox]):not([type=radio]):not([type=hidden]),
+#import-required-defaults .import-default-row > textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+#import-required-defaults.importer-defaults-disabled .import-default-row { opacity: .6; }
+@media (max-width: 640px) {
+  #import-required-defaults .import-default-row { grid-template-columns: minmax(0, 1fr); }
+  #import-required-defaults .import-default-row > * { grid-column: 1; }
+}
+
 label.tabular2{
 text-align: right;
 width: 100px;

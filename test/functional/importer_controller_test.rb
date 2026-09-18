@@ -9,6 +9,95 @@ class ImporterControllerTest < ActionController::TestCase
 
   fixtures :users
 
+  test 'missing product aborts the entire file before parent and relation writes' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "#,Subject,Product,Parent,Related\n1,Child,Design,3,3\n2,Linked,Design,,3\n3,Invalid parent,,,\n")
+    options = required_defaults_request(field, '').merge(unique_field: '#')
+    options[:fields_map].merge!('#' => 'standard_field-id',
+      'Product' => "custom_field-#{field.name}", 'Parent' => 'standard_field-parent_issue',
+      'Related' => 'issue_relation-relates')
+    @controller.expects(:handle_parent_issues).never
+    assert_no_difference ['Issue.count', 'IssueRelation.count', 'Journal.count', 'CustomValue.count', 'Version.count', 'IssueCategory.count'] do
+      post :result, params: options
+    end
+    assert_response :success
+    assert assigns(:required_validation_failed)
+    assert_equal [3], assigns(:file_validation_results).map { |entry| entry[:row_number] }
+    assert_equal 1, assigns(:failed_count)
+    assert_equal [], assigns(:created_issue_ids)
+    assert_equal ImportInProgress::STAGE_FAILED, @iip.reload.stage
+    assert @iip.csv_data.present?
+    assert_select '.importer-failure-reason', text: /Required product/
+  end
+
+  test 'preflight reports every empty required row including whitespace and CLEAR' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Product\nBlank,\nSpaces,   \nClear,[CLEAR]\nValid,Design\n")
+    options = required_defaults_request(field, '')
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    assert_no_difference 'Issue.count' do
+      post :result, params: options
+    end
+    assert_equal [1, 2, 3], assigns(:file_validation_results).map { |entry| entry[:row_number] }
+    assert_equal 3, assigns(:failed_count)
+  end
+
+  test 'an existing product does not mask a mapped empty required CSV cell' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    issue = create_issue_with_scope!('Keep old product', field, 'Production')
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Product\nKeep old product,\n")
+    options = required_defaults_request(field, '').merge(import_mode: 'upsert', unique_field: 'Subject')
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    assert_no_difference ['Issue.count', 'Journal.count'] do
+      post :result, params: options
+    end
+    assert assigns(:required_validation_failed)
+    assert_equal 'Production', issue.reload.custom_field_value(field.id)
+    assert_equal 0, assigns(:unchanged_count)
+  end
+
+  test 'deletion bypasses the required-values preflight' do
+    @controller.expects(:required_csv_fields_missing?).never
+    @iip.update!(csv_data: "Subject\n#{@issue.subject}\n")
+    post :result, params: {
+      project_id: @project.identifier, import_timestamp: @iip.timestamp,
+      import_mode: 'delete', default_tracker: @tracker.id,
+      unique_field: 'Subject', fields_map: { 'Subject' => 'standard_field-subject' }
+    }
+    assert_response :success
+    assert_not Issue.exists?(@issue.id)
+  end
+
+  test 'mapping form renders required custom field defaults with explicit helpers' do
+    assert_includes ImporterController._helpers.ancestors, CustomFieldsHelper
+    field = create_scope_field!('Required default department', %w[Design Production])
+    field.update!(is_required: true)
+    rows = '<row r="1">' + text_cell('A1', 'Subject') + '</row>' +
+           '<row r="2">' + text_cell('A2', 'Required defaults rendering') + '</row>'
+
+    with_xlsx(rows) do |path|
+      post :match, params: {
+        project_id: @project.identifier,
+        file: Rack::Test::UploadedFile.new(path, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      }
+      assert_response :success
+      assert_nil flash[:error]
+      name = "required_defaults[#{@tracker.id}][custom_field_values][#{field.id}]"
+      assert_select 'details#import-required-defaults', count: 1
+      assert_select 'details#import-required-defaults[open]', count: 0
+      assert_select '#default-tracker-for-delete[disabled]', count: 1
+      assert_select "#import-required-defaults select[name='#{name}']", count: 1 do
+        assert_select 'option[value="Design"]', text: 'Design'
+        assert_select 'option[value="Production"]', text: 'Production'
+      end
+      id = "import_defaults_#{@tracker.id}_custom_field_values_#{field.id}"
+      assert_select "label[for='#{id}']", count: 1
+    end
+  end
+
   test 'xlsx upload uses canonical csv options and imports through existing result action' do
     rows = '<row r="1">' + text_cell('A1', 'Subject') + '</row><row r="2">' + text_cell('A2', 'XLSX imported issue') + '</row>'
     with_xlsx(rows) do |path|
@@ -19,6 +108,9 @@ class ImporterControllerTest < ActionController::TestCase
       }
       assert_response :success
       assert_nil flash[:error]
+      assert_select '#import-required-defaults #default_tracker', count: 1
+      assert_select '.import-default-panel', minimum: 1
+      assert_select 'input[name=add_versions]', count: 0
       iip = ImportInProgress.find_by!(user_id: @user.id)
       assert_equal ['U', ',', '"'], [iip.encoding, iip.col_sep, iip.quote_char]
       assert_equal 'XLSX imported issue', CSV.parse(iip.csv_data, headers: true)[0]['Subject']
@@ -66,6 +158,121 @@ class ImporterControllerTest < ActionController::TestCase
     @controller.stubs(:unique_attr_cache_key).with('A', rows[1]).returns('A/two')
     refute @controller.send(:duplicate_csv_keys?, rows, 'code')
     assert_equal 0, @controller.instance_variable_get(:@failed_count)
+  end
+
+  test 'required defaults fill an absent column and tracker without changing tildes' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject\nЗадача ~ 220 В / 〜 / ～\n")
+    post :result, params: required_defaults_request(field, 'Design')
+    assert_response :success
+    issue = Issue.find_by!(subject: 'Задача ~ 220 В / 〜 / ～')
+    assert_equal @tracker.id, issue.tracker_id
+    assert_equal 'Design', issue.custom_field_value(field.id)
+  end
+
+  test 'CSV value takes precedence over a required default' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Department\nCSV wins,Production\n")
+    options = required_defaults_request(field, 'Design')
+    options[:fields_map]['Department'] = "custom_field-#{field.name}"
+    post :result, params: options
+    assert_equal 'Production', Issue.find_by!(subject: 'CSV wins').custom_field_value(field.id)
+  end
+
+  test 'empty required CSV cell uses default' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Department\nEmpty cell,   \n")
+    options = required_defaults_request(field, 'Design')
+    options[:fields_map]['Department'] = "custom_field-#{field.name}"
+    post :result, params: options
+    assert_equal 'Design', Issue.find_by!(subject: 'Empty cell').custom_field_value(field.id)
+  end
+
+  test 'required empty field reports a row failure without creating issue' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject\nMissing department\n")
+    post :result, params: required_defaults_request(field, '')
+    assert_not Issue.exists?(subject: 'Missing department')
+    assert_equal 1, assigns(:failed_count)
+    assert_match(/Required department/, response.body)
+  end
+
+  test 'explicit CLEAR in a required field is not replaced by a default' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Department\nClear requested,[CLEAR]\n")
+    options = required_defaults_request(field, 'Design')
+    options[:fields_map]['Department'] = "custom_field-#{field.name}"
+    post :result, params: options
+    assert_not Issue.exists?(subject: 'Clear requested')
+    assert_equal 1, assigns(:failed_count)
+  end
+
+  test 'required defaults do not overwrite existing nonempty fields' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    issue = create_issue_with_scope!('Keep department', field, 'Production')
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject\nKeep department\n")
+    options = required_defaults_request(field, 'Design').merge(import_mode: 'upsert', unique_field: 'Subject')
+    post :result, params: options
+    assert_equal 'Production', issue.reload.custom_field_value(field.id)
+    assert_equal 0, assigns(:failed_count)
+  end
+
+  test 'default custom value participates in lookup without a CSV column' do
+    field = create_scope_field!('Required department', %w[Design Production])
+    issue = create_issue_with_scope!('Scoped subject', field, 'Design')
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject\nScoped subject\n")
+    options = required_defaults_request(field, 'Design').merge(
+      import_mode: 'upsert', unique_field: 'Subject',
+      unique_scope_fields: ["custom_field-#{field.name}"])
+    assert_no_difference 'Issue.count' do
+      post :result, params: options
+    end
+    assert_equal 0, assigns(:failed_count)
+    assert_equal 'Design', issue.reload.custom_field_value(field.id)
+  end
+
+  test 'unchanged issue still fails workflow required presence check' do
+    Issue.any_instance.stubs(:roles_for_workflow).returns([@role])
+    field = create_scope_field!('Optional department', %w[Design Production])
+    @iip.update!(csv_data: "Subject\n#{@issue.subject}\n")
+    WorkflowPermission.create!(tracker_id: @tracker.id, old_status_id: @issue.status_id,
+                               role_id: @role.id, field_name: 'due_date', rule: 'required')
+    options = required_defaults_request(field, '').merge(import_mode: 'upsert', unique_field: 'Subject')
+    post :result, params: options
+    assert_equal 1, assigns(:failed_count)
+    assert_equal 0, assigns(:unchanged_count)
+  end
+
+  test 'workflow-required standard date accepts a default' do
+    Issue.any_instance.stubs(:roles_for_workflow).returns([@role])
+    field = create_scope_field!('Optional department', %w[Design Production])
+    WorkflowPermission.create!(tracker_id: @tracker.id, old_status_id: @tracker.default_status_id,
+                               role_id: @role.id, field_name: 'due_date', rule: 'required')
+    @iip.update!(csv_data: "Subject\nDefault due date\n")
+    options = required_defaults_request(field, '')
+    options[:required_defaults][@tracker.id.to_s]['due_date'] = '2026-10-01'
+    post :result, params: options
+    assert_equal Date.new(2026, 10, 1), Issue.find_by!(subject: 'Default due date').due_date
+  end
+
+  def required_defaults_request(field, value)
+    @role.update!(permissions: @role.permissions | %i[add_issues edit_issues])
+    {
+      project_id: @project.identifier,
+      import_timestamp: @iip.created.strftime('%Y-%m-%d %H:%M:%S'),
+      import_mode: 'create', default_tracker: @tracker.id.to_s,
+      fields_map: { 'Subject' => 'standard_field-subject' },
+      required_defaults: {
+        @tracker.id.to_s => { 'custom_field_values' => { field.id.to_s => value } }
+      }
+    }
   end
 
   def setup

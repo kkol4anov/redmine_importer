@@ -1,4 +1,7 @@
 en:
+  label_import_stage_validating: "Validating required fields"
+  label_import_invalid_rows: "Rows with missing required values"
+  error_import_required_preflight_abort: "Import not started: required values are missing. No issues, parents or relations were written. Fill the reported cells or set appropriate defaults."
   label_xlsx_sheet: "Worksheet name:"
   text_xlsx_sheet: "Leave blank for the first worksheet. The first non-empty row contains unique column headers. Blank rows are skipped. Formulas use saved results; recalculate and save the workbook before uploading."
   label_xlsx_selected_sheet: "Excel worksheet: %{sheet}"
@@ -180,3 +183,7 @@ en:
   label_result_open_issues: "open in the issue list"
   label_result_open_issues_range: "open #%{from}–#%{to} in the issue list"
   text_result_open_issues_range_hint: "Too many issues to list them one by one in the address: the link opens the range they span and may show other issues that fall into it."
+
+  label_import_required_defaults: "Defaults for required fields"
+  text_import_required_defaults: "Fields depend on the tracker, status and your roles. Defaults fill missing columns or empty cells; existing nonempty issue values are preserved. These defaults do not apply to other trackers in the file. Requirements are checked against each issue's actual tracker and status."
+  error_import_required_fields: "Required fields are empty: %{fields}"

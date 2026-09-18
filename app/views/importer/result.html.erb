@@ -24,10 +24,15 @@
 
 <% if @file_validation_failed %>
   <h2><%= I18n.t(:label_import_file_validation, default: 'Проверка файла импорта') %></h2>
+  <% if @required_validation_failed %>
+    <p><%= l(:error_import_required_preflight_abort) %></p>
+    <h3><%= l(:label_import_invalid_rows) %></h3>
+  <% else %>
   <p><%= I18n.t(:text_import_file_validation_failed,
                 default: 'Импорт не выполнялся: обнаружены повторяющиеся составные ключи. Ни одна задача не была создана или изменена.') %></p>
 
   <h3><%= I18n.t(:label_duplicate_csv_rows, default: 'Повторяющиеся строки CSV') %></h3>
+  <% end %>
   <table class="list importer-result-rows">
     <thead>
       <tr>

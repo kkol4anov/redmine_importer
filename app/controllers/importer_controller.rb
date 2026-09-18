@@ -4,6 +4,8 @@ require 'csv'
 require 'securerandom'
 require 'tempfile'
 require_relative '../../lib/redmine_importer/xlsx_reader'
+require_relative '../../lib/redmine_importer/required_defaults'
+require_relative '../../lib/redmine_importer/required_preflight'
 
 class MultipleIssuesForUniqueValue < RuntimeError
   attr_accessor :issue_ids
@@ -13,8 +15,12 @@ UnusableUniqueField = Class.new(RuntimeError)
 ImportCancelled = Class.new(RuntimeError)
 
 class ImporterController < ApplicationController
+  include RedmineImporter::RequiredPreflight
   using RedmineImporter::Patches::Redmine51ToFsMethodPatch
   before_action :find_project
+  # Redmine disables include_all_helpers. Required-field defaults render
+  # native custom-field widgets, just like IssuesController does.
+  helper :custom_fields
 
   ISSUE_ATTRS = %i[id subject assigned_to fixed_version
                    author description category priority tracker status
@@ -464,6 +470,11 @@ class ImporterController < ApplicationController
       return
     end
 
+    if required_csv_fields_missing?(rows, unique_attr, unique_field, update_issue)
+      finalize_import
+      return
+    end
+
     begin_progress_phase(ImportInProgress::STAGE_IMPORTING, rows.size)
 
     rows.each do |row|
@@ -559,6 +570,8 @@ class ImporterController < ApplicationController
         assign_issue_attrs(issue, category, fixed_version_id, assigned_to, status, row, priority, tracker)
         handle_parent_issues(issue, row, ignore_non_exist, unique_attr, unique_field)
         handle_custom_fields(add_versions, issue, project, row)
+        apply_required_defaults(issue, row)
+        validate_import_required_fields!(issue, row)
         handle_watchers(issue, row, watchers)
         if diagnostic_row?(row)
           diagnostic_log('row.after_assignment', diagnostic_row_payload(row).merge(
@@ -1149,7 +1162,7 @@ class ImporterController < ApplicationController
       # the value of the scope field is taken from the CSV row,
       # so the field has to be mapped to a column
       column = @attrs_map[field_key]
-      if column.blank?
+      if column.blank? && default_scope_values(cf).nil?
         flash[:error] = l(:error_unique_scope_field_not_mapped, field: cf_name)
         return nil
       end
@@ -1193,14 +1206,48 @@ class ImporterController < ApplicationController
       end
 
       raw_value = row[field[:column]].to_s.strip
+      defaults = default_scope_values(field[:custom_field], row) if raw_value.blank?
 
-      if raw_value.blank?
+      if defaults
+        [field[:filter], '=', defaults]
+      elsif raw_value.blank?
         # an empty value in the CSV means "issues without any value"
         [field[:filter], '!*', ['']]
       else
         [field[:filter], '=', [scope_filter_value(field[:custom_field], raw_value)]]
       end
     end
+  end
+
+  # Native widgets submit stored custom values (IDs for users/versions/list
+  # enumerations). Use the very same values for lookup and duplicate keys;
+  # passing them through the CSV name-to-ID converter would corrupt matching.
+  def default_scope_values(field, row = nil)
+    return nil if import_mode == 'delete'
+    defaults = required_defaults_params
+    values = defaults['custom_field_values']
+    return nil unless values.respond_to?(:keys)
+    value = values[field.id.to_s]
+    return nil unless RedmineImporter::RequiredDefaults.present_value?(value)
+
+    tracker_id = params[:default_tracker].to_s
+    if row
+      name = fetch('standard_field-tracker', row)
+      return nil if name.present? && (tracker_by_name(name)&.id || tracker_id).to_s != tracker_id
+    end
+    @default_scope_issues ||= {}
+    status_name = fetch('standard_field-status', row) if row
+    status = status_by_name(status_name) if status_name.present?
+    status_id = status&.id || defaults['status_id'].presence
+    issue = @default_scope_issues[[tracker_id, status_id]] ||= begin
+      candidate = Issue.new(project: @project, tracker_id: tracker_id, author: User.current)
+      candidate.safe_attributes = { 'status_id' => status_id } if status_id
+      candidate
+    end
+    return nil unless RedmineImporter::RequiredDefaults.required(issue).last.include?(field.id.to_s)
+    return nil unless issue.editable_custom_fields.any? { |cf| cf.id == field.id }
+
+    Array(value).reject(&:blank?).map(&:to_s)
   end
 
   # Mirrors the way the tracker is assigned to the issue itself:
@@ -1350,6 +1397,89 @@ class ImporterController < ApplicationController
     else
       @affect_projects_issues[project.name] = 1
     end
+  end
+
+  # Defaults belong to the selected default tracker. A CSV row explicitly
+  # using another tracker must satisfy that tracker's own requirements.
+  def required_defaults_params
+    return {} if import_mode == 'delete'
+
+    values = params[:required_defaults]
+    values = values[params[:default_tracker].to_s] if values.respond_to?(:keys)
+    return {} unless values.respond_to?(:to_unsafe_h) || values.is_a?(Hash)
+
+    values.respond_to?(:to_unsafe_h) ? values.to_unsafe_h : values
+  end
+
+  def default_cell_missing?(row, key)
+    column = @attrs_map[key]
+    column.nil? || row[column].to_s.strip.empty?
+  end
+
+  def apply_required_defaults(issue, row)
+    return unless issue.tracker_id.to_s == params[:default_tracker].to_s
+    return unless issue.project_id == @project.id
+
+    defaults = required_defaults_params
+    return if defaults.empty?
+
+    policy = RedmineImporter::RequiredDefaults
+    # A default status can change workflow requirements. Apply it first.
+    status = defaults['status_id']
+    if policy.present_value?(status) && default_cell_missing?(row, 'standard_field-status') &&
+       (issue.new_record? || issue.status_id.blank?)
+      issue.safe_attributes = { 'status_id' => status }
+    end
+
+    core, custom = policy.required(issue)
+    attrs = {}
+    (core - ['status_id']).each do |attribute|
+      value = defaults[attribute]
+      next unless policy.present_value?(value)
+      next unless default_cell_missing?(row, policy.csv_key(attribute))
+      next unless issue.new_record? || !policy.present_value?(issue.public_send(attribute))
+
+      attrs[attribute] = value
+    end
+    cf_defaults = defaults['custom_field_values']
+    cf_defaults = {} unless cf_defaults.respond_to?(:keys)
+    values = {}
+    issue.available_custom_fields.each do |field|
+      next unless custom.include?(field.id.to_s)
+      value = cf_defaults[field.id.to_s]
+      next unless policy.present_value?(value)
+      next unless default_cell_missing?(row, "custom_field-#{field.name}")
+      next unless issue.new_record? || !policy.present_value?(issue.custom_field_value(field.id))
+
+      values[field.id.to_s] = value
+    end
+    attrs['custom_field_values'] = values unless values.empty?
+    issue.safe_attributes = attrs unless attrs.empty?
+  end
+
+  # Check before the unchanged fast path too: skipping #save must not bypass
+  # required-field validation. [CLEAR] is an explicit request, not a missing
+  # cell, and must never be silently replaced by a default.
+  def validate_import_required_fields!(issue, row)
+    policy = RedmineImporter::RequiredDefaults
+    core, custom = policy.required(issue)
+    missing = core.filter_map do |attribute|
+      raw = row[@attrs_map[policy.csv_key(attribute)]]
+      next if !clear_marker?(raw) && policy.present_value?(issue.public_send(attribute))
+
+      l_or_humanize(attribute.delete_suffix('_id'), prefix: 'field_')
+    end
+    issue.custom_field_values.each do |value|
+      next unless custom.include?(value.custom_field_id.to_s)
+      raw = row[@attrs_map["custom_field-#{value.custom_field.name}"]]
+      next if !clear_marker?(raw) && policy.present_value?(value.value)
+
+      missing << value.custom_field.name
+    end
+    return if missing.empty?
+
+    log_failure(row, l(:error_import_required_fields, fields: missing.join(', ')))
+    raise RowFailed
   end
 
   def assign_issue_attrs(issue, category, fixed_version_id, assigned_to, status, row, priority, tracker)
@@ -1528,6 +1658,9 @@ class ImporterController < ApplicationController
   end
 
   def init_globals
+    @file_validation_failed = false
+    @required_validation_failed = false
+    @file_validation_results = []
     @handle_count = 0
     @update_count = 0
     @skip_count = 0
@@ -2018,7 +2151,7 @@ class ImporterController < ApplicationController
     return if @iip.nil? || @progress_finished
 
     @progress_finished = true
-    broken = failed || flash[:error].present?
+    broken = failed || flash[:error].present? || @file_validation_failed
 
     if @progress.nil?
       # Nothing could be written along the way either: behave exactly as the

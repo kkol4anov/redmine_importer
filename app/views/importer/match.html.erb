@@ -17,6 +17,7 @@
      data-cancel-url="<%= url_for(:controller => 'importer', :action => 'cancel',
                                   :project_id => @project.id) %>"
      data-stage-labels="<%= { 'preparing'  => l(:label_import_stage_preparing),
+                              'validating' => l(:label_import_stage_validating),
                               'lookup'     => l(:label_import_stage_lookup),
                               'importing'  => l(:label_import_stage_importing),
                               'matching'   => l(:label_import_stage_matching),
@@ -65,6 +66,38 @@
     <% end %>
   </fieldset>
 
+  <details class="box" id="import-required-defaults">
+    <summary><%= l(:label_import_required_defaults) %></summary>
+    <p><%= l(:text_import_required_defaults) %></p>
+    <div class="import-default-row">
+      <label class="rule-label" for="default_tracker"><%= l(:label_default_tracker) %></label>
+      <%= select_tag "default_tracker",
+        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
+    </div>
+    <%# Disabled selects are not submitted. Preserve the selected tracker for
+        delete matching through a hidden mirror, enabled only in that mode. %>
+    <%= hidden_field_tag 'default_tracker', '', id: 'default-tracker-for-delete', disabled: true %>
+    <% importer_default_panels.each do |panel| %>
+      <% issue = panel[:issue]; prefix = "required_defaults[#{issue.tracker_id}]" %>
+      <div class="import-default-panel" data-tracker="<%= issue.tracker_id %>"
+           data-status="<%= issue.status_id %>" data-requirements="<%= panel[:requirements].to_json %>">
+        <% core = panel[:requirements].values.flat_map(&:first).uniq %>
+        <% custom = panel[:requirements].values.flat_map(&:last).uniq %>
+        <% core.each do |attribute| %>
+          <p class="import-default-row" data-core="<%= attribute %>">
+            <%= importer_default_core_input(issue, panel[:statuses], prefix, attribute) %>
+          </p>
+        <% end %>
+        <% issue.custom_field_values.each do |value| %>
+          <% next unless custom.include?(value.custom_field_id.to_s) %>
+          <p class="import-default-row" data-custom="<%= value.custom_field_id %>">
+            <%= importer_default_custom_input(issue, value) %>
+          </p>
+        <% end %>
+      </div>
+    <% end %>
+  </details>
+
   <fieldset class="box">
     <legend><%= l(:label_import_rule) %></legend>
 
@@ -102,11 +135,6 @@
     </span>
     <br/>
 
-    <div class="rule-row">
-      <label class="rule-label" for="default_tracker"><%= l(:label_default_tracker) %></label>
-      <%= select_tag "default_tracker",
-        options_from_collection_for_select(@project.trackers, 'id', 'name') %>
-    </div>
 
     <div id="unique_field_wrapper" class="rule-row">
       <label class="rule-label" for="unique_field"><%= l(:label_unique_field) %></label>
@@ -185,11 +213,6 @@
       <label>
         <%= check_box_tag "add_categories", true, false %>
         <%= l(:label_importer_add_categories) %>
-      </label>
-      <br/>
-      <label>
-        <%= check_box_tag "add_versions", true, false %>
-        <%= l(:label_importer_add_versions) %>
       </label>
       <br/>
       <label>
@@ -307,7 +330,7 @@
       // nothing is written to the issues while they are being deleted, and
       // no user is read out of the file either
       $('#write_options').toggleClass('importer-disabled', deleting);
-      $('#send_emails, #add_categories, #add_versions, #clear_empty_cells, #use_anonymous')
+      $('#send_emails, #add_categories, #clear_empty_cells, #use_anonymous')
         .prop('disabled', deleting);
       $('#use_anonymous_wrapper').toggleClass('importer-disabled', deleting);
 
@@ -380,7 +403,35 @@
       }
     }
 
+    function refreshRequiredDefaults() {
+      var tracker = $('#default_tracker').val();
+      var deleting = deleteMode();
+      $('#default_tracker').prop('disabled', deleting);
+      $('#default-tracker-for-delete').val(tracker).prop('disabled', !deleting);
+      $('#import-required-defaults').toggleClass('importer-defaults-disabled', deleting);
+      $('.import-default-panel').each(function() {
+        var panel = $(this);
+        var selected = String(panel.data('tracker')) === String(tracker);
+        var active = selected && !deleting;
+        panel.toggle(selected);
+        panel.find(':input').prop('disabled', !active);
+        var status = panel.find('.import-default-status').val() || String(panel.data('status'));
+        var requirements = panel.data('requirements')[status] || [[], []];
+        panel.find('[data-core], [data-custom]').each(function() {
+          var field = $(this);
+          var core = field.attr('data-core');
+          var required = core ? requirements[0].indexOf(core) >= 0 :
+            requirements[1].indexOf(field.attr('data-custom')) >= 0;
+          field.toggle(required);
+          // Defaults are optional: the value may be supplied by the file.
+          field.find(':input').prop('disabled', !active || !required).prop('required', false);
+        });
+      });
+    }
+    $('#default_tracker, .import-default-status').on('change', refreshRequiredDefaults);
+
     function refreshImportRules() {
+      refreshRequiredDefaults();
       toggleIdColumnWarning();
       toggleUniqueMatching();
       toggleModes();
