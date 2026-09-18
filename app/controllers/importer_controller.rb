@@ -5,6 +5,7 @@ require 'securerandom'
 require 'tempfile'
 require_relative '../../lib/redmine_importer/xlsx_reader'
 require_relative '../../lib/redmine_importer/required_defaults'
+require_relative '../../lib/redmine_importer/required_preflight'
 
 class MultipleIssuesForUniqueValue < RuntimeError
   attr_accessor :issue_ids
@@ -14,6 +15,7 @@ UnusableUniqueField = Class.new(RuntimeError)
 ImportCancelled = Class.new(RuntimeError)
 
 class ImporterController < ApplicationController
+  include RedmineImporter::RequiredPreflight
   using RedmineImporter::Patches::Redmine51ToFsMethodPatch
   before_action :find_project
   # Redmine disables include_all_helpers. Required-field defaults render
@@ -464,6 +466,11 @@ class ImporterController < ApplicationController
       run_delete(rows, unique_attr, unique_field, ignore_non_exist,
                  update_other_project)
       report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
+      finalize_import
+      return
+    end
+
+    if required_csv_fields_missing?(rows, unique_attr, unique_field, update_issue)
       finalize_import
       return
     end
@@ -1651,6 +1658,9 @@ class ImporterController < ApplicationController
   end
 
   def init_globals
+    @file_validation_failed = false
+    @required_validation_failed = false
+    @file_validation_results = []
     @handle_count = 0
     @update_count = 0
     @skip_count = 0
@@ -2141,7 +2151,7 @@ class ImporterController < ApplicationController
     return if @iip.nil? || @progress_finished
 
     @progress_finished = true
-    broken = failed || flash[:error].present?
+    broken = failed || flash[:error].present? || @file_validation_failed
 
     if @progress.nil?
       # Nothing could be written along the way either: behave exactly as the

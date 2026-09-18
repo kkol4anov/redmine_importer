@@ -9,6 +9,68 @@ class ImporterControllerTest < ActionController::TestCase
 
   fixtures :users
 
+  test 'missing product aborts the entire file before parent and relation writes' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "#,Subject,Product,Parent,Related\n1,Child,Design,3,3\n2,Linked,Design,,3\n3,Invalid parent,,,\n")
+    options = required_defaults_request(field, '').merge(unique_field: '#')
+    options[:fields_map].merge!('#' => 'standard_field-id',
+      'Product' => "custom_field-#{field.name}", 'Parent' => 'standard_field-parent_issue',
+      'Related' => 'issue_relation-relates')
+    @controller.expects(:handle_parent_issues).never
+    assert_no_difference ['Issue.count', 'IssueRelation.count', 'Journal.count', 'CustomValue.count', 'Version.count', 'IssueCategory.count'] do
+      post :result, params: options
+    end
+    assert_response :success
+    assert assigns(:required_validation_failed)
+    assert_equal [3], assigns(:file_validation_results).map { |entry| entry[:row_number] }
+    assert_equal 1, assigns(:failed_count)
+    assert_equal [], assigns(:created_issue_ids)
+    assert_equal ImportInProgress::STAGE_FAILED, @iip.reload.stage
+    assert @iip.csv_data.present?
+    assert_select '.importer-failure-reason', text: /Required product/
+  end
+
+  test 'preflight reports every empty required row including whitespace and CLEAR' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Product\nBlank,\nSpaces,   \nClear,[CLEAR]\nValid,Design\n")
+    options = required_defaults_request(field, '')
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    assert_no_difference 'Issue.count' do
+      post :result, params: options
+    end
+    assert_equal [1, 2, 3], assigns(:file_validation_results).map { |entry| entry[:row_number] }
+    assert_equal 3, assigns(:failed_count)
+  end
+
+  test 'an existing product does not mask a mapped empty required CSV cell' do
+    field = create_scope_field!('Required product', %w[Design Production])
+    issue = create_issue_with_scope!('Keep old product', field, 'Production')
+    field.update!(is_required: true)
+    @iip.update!(csv_data: "Subject,Product\nKeep old product,\n")
+    options = required_defaults_request(field, '').merge(import_mode: 'upsert', unique_field: 'Subject')
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    assert_no_difference ['Issue.count', 'Journal.count'] do
+      post :result, params: options
+    end
+    assert assigns(:required_validation_failed)
+    assert_equal 'Production', issue.reload.custom_field_value(field.id)
+    assert_equal 0, assigns(:unchanged_count)
+  end
+
+  test 'deletion bypasses the required-values preflight' do
+    @controller.expects(:required_csv_fields_missing?).never
+    @iip.update!(csv_data: "Subject\n#{@issue.subject}\n")
+    post :result, params: {
+      project_id: @project.identifier, import_timestamp: @iip.timestamp,
+      import_mode: 'delete', default_tracker: @tracker.id,
+      unique_field: 'Subject', fields_map: { 'Subject' => 'standard_field-subject' }
+    }
+    assert_response :success
+    assert_not Issue.exists?(@issue.id)
+  end
+
   test 'mapping form renders required custom field defaults with explicit helpers' do
     assert_includes ImporterController._helpers.ancestors, CustomFieldsHelper
     field = create_scope_field!('Required default department', %w[Design Production])
@@ -24,6 +86,9 @@ class ImporterControllerTest < ActionController::TestCase
       assert_response :success
       assert_nil flash[:error]
       name = "required_defaults[#{@tracker.id}][custom_field_values][#{field.id}]"
+      assert_select 'details#import-required-defaults', count: 1
+      assert_select 'details#import-required-defaults[open]', count: 0
+      assert_select '#default-tracker-for-delete[disabled]', count: 1
       assert_select "#import-required-defaults select[name='#{name}']", count: 1 do
         assert_select 'option[value="Design"]', text: 'Design'
         assert_select 'option[value="Production"]', text: 'Production'

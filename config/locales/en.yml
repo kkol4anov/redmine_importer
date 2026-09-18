@@ -1,4 +1,7 @@
 en:
+  label_import_stage_validating: "Validating required fields"
+  label_import_invalid_rows: "Rows with missing required values"
+  error_import_required_preflight_abort: "Import not started: required values are missing. No issues, parents or relations were written. Fill the reported cells or set appropriate defaults."
   label_xlsx_sheet: "Worksheet name:"
   text_xlsx_sheet: "Leave blank for the first worksheet. The first non-empty row contains unique column headers. Blank rows are skipped. Formulas use saved results; recalculate and save the workbook before uploading."
   label_xlsx_selected_sheet: "Excel worksheet: %{sheet}"
