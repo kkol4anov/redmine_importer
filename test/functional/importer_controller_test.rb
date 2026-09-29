@@ -37,16 +37,22 @@ class ImporterControllerTest < ActionController::TestCase
     assert_includes assigns(:updated_issue_ids), @issue.id
   end
 
-  test 'relation custom field lookup is independent of source ID matching' do
-    field = create_scope_field!('Relation code', ['X1'])
+  test 'relations use the common custom unique field across trackers' do
+    field = create_scope_field!('Relation code', ['SRC', 'X1'])
     tracker = relation_other_tracker
     tracker.custom_fields << field
-    target = create_issue_with_scope!('Existing target', field, 'X1')
+    source = create_issue_with_scope!('Source', field, 'SRC')
+    target = create_issue_with_scope!('Target', field, 'X1')
     target.update!(tracker: tracker)
-    post :result, params: relation_request("ID,Related\n#{@issue.id},X1\n",
-      relation_match_field: "cf_#{field.id}", relations_cross_tracker: '1')
+    @iip.update!(csv_data: "Code,Related\nSRC,X1\n")
+    post :result, params: {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: 'upsert', default_tracker: @tracker.id,
+      unique_field: 'Code', unique_scope_tracker: '1', relations_cross_tracker: '1',
+      fields_map: { 'Code' => "custom_field-#{field.name}", 'Related' => 'issue_relation-relates' }
+    }
     assert_response :success
-    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+    assert_equal [target.id], source.reload.relations.map { |rel| rel.other_issue(source).id }
   end
 
   test 'relation tracker option does not broaden source row matching' do
@@ -60,7 +66,7 @@ class ImporterControllerTest < ActionController::TestCase
 
   test 'relation cross tracker lookup is opt in for a unique value' do
     target = create_issue!(@project, @user, tracker: relation_other_tracker, subject: 'Other target')
-    post :result, params: relation_request("ID,Related\n#{@issue.id},Other target\n", relation_match_field: 'subject')
+    post :result, params: relation_subject_request("Subject,Tracker,Related\n#{@issue.subject},Defect,Other target\n", 'upsert', nil)
     assert_empty @issue.reload.relations
     assert assigns(:messages).any? { |message| message.include?('Other target') }
   end
@@ -101,12 +107,12 @@ class ImporterControllerTest < ActionController::TestCase
     assert IssueRelation.exists?(relation.id)
   end
 
-  test 'explicit relation field supports creation without an import unique column' do
+  test 'relations use the common unique column when creating issues' do
     target = create_issue!(@project, @user, tracker: @tracker, subject: 'Existing target')
     @iip.update!(csv_data: "Subject,Related\nFresh source,Existing target\n")
     post :result, params: {
       import_timestamp: @iip.timestamp, project_id: @project.identifier,
-      import_mode: 'create', default_tracker: @tracker.id, relation_match_field: 'subject',
+      import_mode: 'create', default_tracker: @tracker.id, unique_field: 'Subject',
       fields_map: { 'Subject' => 'standard_field-subject', 'Related' => 'issue_relation-relates' }
     }
     source = Issue.find_by!(subject: 'Fresh source')
@@ -133,10 +139,22 @@ class ImporterControllerTest < ActionController::TestCase
     end
   end
 
-  test 'an invalid relation field aborts before writing issues' do
-    options = relation_request("ID,Related\n#{@issue.id},X1\n", relation_match_field: 'private_notes')
-    assert_no_difference ['IssueRelation.count', 'Journal.count'] do
-      post :result, params: options
+  test 'obsolete relation field parameter cannot override common ID matching' do
+    target = create_issue!(@project, @user, tracker: relation_other_tracker)
+    options = relation_request("ID,Related\n#{@issue.id},#{target.id}\n", relation_match_field: 'subject')
+    post :result, params: options
+    assert_response :success
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+  end
+
+  test 'obsolete relation field does not bypass the common unique column requirement' do
+    @iip.update!(csv_data: "Subject,Related\nFresh source,Existing target\n")
+    assert_no_difference ['Issue.count', 'IssueRelation.count'] do
+      post :result, params: {
+        import_timestamp: @iip.timestamp, project_id: @project.identifier,
+        import_mode: 'create', default_tracker: @tracker.id, relation_match_field: 'subject',
+        fields_map: { 'Subject' => 'standard_field-subject', 'Related' => 'issue_relation-relates' }
+      }
     end
     assert flash[:error].present?
   end

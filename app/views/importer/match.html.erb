@@ -169,11 +169,7 @@
     </div>
     
     <div id="relation_options">
-      <div class="rule-row">
-        <label class="rule-label" for="relation_match_field"><%= l(:label_relation_match_field) %></label>
-        <%= select_tag 'relation_match_field', options_for_select(@relation_match_attrs, 'same') %>
-        <%= importer_hint(l(:label_relation_match_field_info)) %>
-      </div>
+      <p class="info"><%= l(:label_relation_matching_info) %></p>
       <label>
         <%= check_box_tag 'relations_cross_tracker', true, false %>
         <%= l(:label_relations_cross_tracker) %>
@@ -344,7 +340,7 @@
       // nothing is written to the issues while they are being deleted, and
       // no user is read out of the file either
       $('#relation_options').toggleClass('importer-disabled', deleting);
-      $('#relation_match_field, #relations_cross_tracker').prop('disabled', deleting);
+      $('#relations_cross_tracker').prop('disabled', deleting);
       $('#write_options').toggleClass('importer-disabled', deleting);
       $('#send_emails, #add_categories, #clear_empty_cells, #use_anonymous')
         .prop('disabled', deleting);

@@ -195,12 +195,6 @@ class ImporterController < ApplicationController
       @attrs.push([l_or_humanize(rinfo[:name]), "issue_relation-#{rtype}"])
     end
     @attrs.sort!
-    @relation_match_attrs = [[l(:label_relation_match_same), 'same'],
-                             [l(:field_id), 'issue_id'],
-                             [l(:field_subject), 'subject']]
-    @relation_match_attrs += @project.all_issue_custom_fields.select(&:is_filter?).map do |field|
-      [field.name, "cf_#{field.id}"]
-    end
 
     # Custom fields that can be used to narrow the scope in which
     # the values of the unique column are matched.
@@ -413,7 +407,6 @@ class ImporterController < ApplicationController
 
       IssueRelation::TYPES.each_key do |t|
         next if @attrs_map["issue_relation-#{t}"].blank?
-        next if params[:relation_match_field].present? && params[:relation_match_field] != 'same'
         next if relation_columns_clear_only?(iip)
 
         flash[:error] = l(:text_rmi_specify_unique_field_for_column,
@@ -454,7 +447,8 @@ class ImporterController < ApplicationController
     # if error is full, NOP
     return if flash[:error].present?
 
-    return unless configure_relation_matching(unique_attr)
+    # Relations always use the same identifier as the imported rows.
+    @relation_match_attr = unique_attr
 
     @diagnostic_unique_field = unique_field
     @diagnostic_unique_attr = unique_attr
@@ -1909,25 +1903,6 @@ class ImporterController < ApplicationController
     end
   end
 
-  # Relations have their own lookup policy; row matching and parents retain
-  # their original tracker boundary and caches.
-  def configure_relation_matching(unique_attr)
-    return true if @delete_mode
-    return true unless IssueRelation::TYPES.keys.any? { |type| @attrs_map["issue_relation-#{type}"].present? }
-
-    selected = params[:relation_match_field].presence || 'same'
-    @relation_match_same = selected == 'same'
-    @relation_match_attr = @relation_match_same ? unique_attr : selected
-    allowed = ['issue_id', 'subject'] + @project.all_issue_custom_fields.select(&:is_filter?).map { |cf| "cf_#{cf.id}" }
-    usable = @relation_match_attr.nil? || @relation_match_attr == 'issue_id' ||
-             new_importer_query.available_filters.key?(@relation_match_attr)
-    unless usable && (@relation_match_same || allowed.include?(selected))
-      flash[:error] = l(:error_relation_match_field)
-      return false
-    end
-    true
-  end
-
   def relation_columns_clear_only?(iip)
     columns = IssueRelation::TYPES.keys.map { |type| @attrs_map["issue_relation-#{type}"] }.compact
     csv_rows(iip, csv_options(iip)).all? do |row|
@@ -1944,8 +1919,7 @@ class ImporterController < ApplicationController
       filters = filters.reject { |filter, _operator, _values| filter == 'tracker_id' }
     elsif filters.none? { |filter, _operator, _values| filter == 'tracker_id' }
       field = tracker_scope_field
-      # ID row matching disables the tracker scope widget, but a separate
-      # relation field should still be restricted unless explicitly enabled.
+      # Keep relation lookup within the row tracker unless explicitly enabled.
       field ||= { column: @attrs_map['standard_field-tracker'], default: params[:default_tracker] }
       tracker_id = tracker_scope_id(row, field)
       filters = filters + [['tracker_id', '=', [tracker_id.to_s]]] if tracker_id.present?
@@ -1958,12 +1932,12 @@ class ImporterController < ApplicationController
   end
 
   def relation_target(value, row, internal_index)
-    if @relation_match_same && csv_internal_ids?
+    if csv_internal_ids?
       ids = internal_index[relation_internal_key(value)] || []
       candidates = Issue.visible.where(id: ids).to_a
     elsif @relation_match_attr == 'issue_id'
       candidates = value.match?(/\A[0-9]+\z/) ? Issue.visible.where(id: value).limit(2).to_a : []
-    elsif @relation_match_same && extract_unique_value?
+    elsif extract_unique_value?
       code = extract_unique_value(value, reference: true)
       candidates = code.nil? ? [] : issues_by_extracted_value(@relation_match_attr, code, row,
         scope_filters: relation_scope_filters(row)).select(&:visible?)
@@ -1993,7 +1967,7 @@ class ImporterController < ApplicationController
     return if columns.empty?
 
     internal_index = Hash.new { |hash, key| hash[key] = [] }
-    if @relation_match_same && csv_internal_ids?
+    if csv_internal_ids?
       @relation_rows.each do |entry|
         key = relation_internal_key(entry[:row][unique_field])
         internal_index[key] |= [entry[:issue_id]] if key

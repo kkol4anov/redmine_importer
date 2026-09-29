@@ -1,11 +1,8 @@
 en:
-  label_relation_match_same: "Same as import unique field"
-  label_relation_match_field: "Find related issues by:"
-  label_relation_match_field_info: "Independent of row matching: Redmine ID, subject or a filterable custom field. Same as import unique field preserves extraction and file-local IDs. An explicit field uses its full value and need not be mapped. Separate multiple targets with commas."
+  label_relation_matching_info: "Related issues use the common import matching mode: ID or the selected unique field, including its value extraction settings. Separate multiple relation values with commas."
   label_relations_cross_tracker: "Find related issues across trackers"
   label_relations_cross_tracker_info: "Applies to create and update. Removes only the relation tracker boundary; row and parent matching stay unchanged. Other selected boundaries remain. Redmine IDs are independent of tracker. Ambiguous matches are skipped."
   label_relation_clear_info: "[CLEAR] removes only the relation type mapped to the column. Empty cells keep links unless clearing empty cells is enabled. All clears run before additions. Manage issue relations permission is required."
-  error_relation_match_field: "The selected relation lookup field is unavailable."
   warning_relation_permission: "Relations of issue #%{id} were not changed: insufficient permission or an inaccessible endpoint."
   warning_relation_missing: "Issue #%{id}, column %{column}: target %{value} was not found or is inaccessible."
   warning_relation_ambiguous: "Issue #%{id}, column %{column}: target %{value} is ambiguous; no relation was created."
