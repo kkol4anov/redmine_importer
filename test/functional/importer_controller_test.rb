@@ -9,6 +9,172 @@ class ImporterControllerTest < ActionController::TestCase
 
   fixtures :users
 
+  %w[extend replace].each do |mode|
+    test "relation boundary #{mode} combines or replaces shared conditions" do
+      product = create_scope_field!('Scope product', ['A', 'B'])
+      section = create_scope_field!('Scope section', ['North', 'South'])
+      source = create_issue_with_scope!('Source', product, 'A')
+      first = create_issue_with_scope!('Target', product, 'A')
+      other_product = create_issue_with_scope!('Target', product, 'B')
+      other_section = create_issue_with_scope!('Target', product, 'A')
+      [source, first, other_product].each do |issue|
+        issue.custom_field_values = { section.id => 'North' }
+        issue.save!
+      end
+      other_section.custom_field_values = { section.id => 'South' }
+      other_section.save!
+      options = relation_subject_request("Subject,Tracker,Product,Section,Related\nSource,Defect,A,North,Target\n", 'upsert', nil)
+      options[:fields_map].merge!('Product' => "custom_field-#{product.name}", 'Section' => "custom_field-#{section.name}")
+      # Include an overlapping field in extend mode to verify deduplication.
+      selected = ["custom_field-#{section.name}"]
+      selected << "custom_field-#{product.name}" if mode == 'extend'
+      options.merge!(unique_scope_fields: ["custom_field-#{product.name}"],
+        relation_scope_mode: mode, relation_scope_fields: selected,
+        relation_tracker_mode: 'all', relation_target_mode: 'all')
+      post :result, params: options
+      expected = mode == 'extend' ? [first.id] : [first.id, other_product.id]
+      assert_equal expected.sort, source.reload.relations.map { |rel| rel.other_issue(source).id }.sort
+      filters = assigns(:relation_scope_fields).map { |field| field[:filter] }
+      assert_equal filters.uniq, filters
+      assert_empty other_section.reload.relations
+    end
+  end
+
+  test 'self is excluded before unique relation lookup on initial import' do
+    tracker = relation_other_tracker
+    target = create_issue!(@project, @user, tracker: @tracker, subject: 'K-001')
+    options = relation_subject_request("Subject,Tracker,Related\nK-001,Feature,K-001\n", 'create', nil)
+    options.merge!(relation_tracker_mode: 'all', relation_target_mode: 'single')
+    post :result, params: options
+    source = Issue.find_by!(tracker_id: tracker.id, subject: 'K-001')
+    assert_equal [target.id], source.relations.map { |relation| relation.other_issue(source).id }
+  end
+
+  test 'all matching links span products and three trackers without widening updates' do
+    field = create_scope_field!('Product boundary', ['A', 'B'])
+    tracker = relation_other_tracker
+    third = Tracker.create!(name: 'Review', default_status: @tracker.default_status)
+    @project.trackers << third
+    [tracker, third].each { |item| item.custom_fields << field }
+    source = create_issue_with_scope!('K-001', field, 'A')
+    first = create_issue_with_scope!('K-001', field, 'A')
+    first.update!(tracker: tracker)
+    second = create_issue_with_scope!('K-001', field, 'B')
+    second.update!(tracker: third)
+    @iip.update!(csv_data: "Subject,Tracker,Product,Related\nK-001,Defect,A,K-001\n")
+    options = {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: 'upsert', default_tracker: @tracker.id, unique_field: 'Subject',
+      unique_scope_tracker: '1', unique_scope_fields: ["custom_field-#{field.name}"],
+      relation_tracker_mode: 'all', relation_scope_mode: 'none', relation_target_mode: 'all',
+      fields_map: { 'Subject' => 'standard_field-subject', 'Tracker' => 'standard_field-tracker',
+                    'Product' => "custom_field-#{field.name}", 'Related' => 'issue_relation-relates' }
+    }
+    assert_no_difference 'Issue.count' do
+      assert_difference 'IssueRelation.count', 2 do
+        post :result, params: options
+      end
+    end
+    assert_equal [first.id, second.id].sort, source.reload.relations.map { |rel| rel.other_issue(source).id }.sort
+    assert_equal 'B', second.reload.custom_field_value(field.id)
+  end
+
+  test 'separate product boundary restricts relations while update matching has no product boundary' do
+    field = create_scope_field!('Link product', ['A', 'B'])
+    source = create_issue_with_scope!('Source', field, 'A')
+    first = create_issue_with_scope!('Target', field, 'A')
+    second = create_issue_with_scope!('Target', field, 'B')
+    options = relation_subject_request("Subject,Tracker,Product,Related\nSource,Defect,A,Target\n", 'upsert', nil)
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    options.merge!(relation_tracker_mode: 'all', relation_scope_mode: 'custom',
+                   relation_scope_fields: ["custom_field-#{field.name}"], relation_target_mode: 'all')
+    post :result, params: options
+    assert_equal [first.id], source.reload.relations.map { |rel| rel.other_issue(source).id }
+    assert_empty second.reload.relations
+  end
+
+  test 'inherited boundaries exclude a different product from all matches' do
+    field = create_scope_field!('Link product', ['A', 'B'])
+    source = create_issue_with_scope!('Source', field, 'A')
+    first = create_issue_with_scope!('Target', field, 'A')
+    second = create_issue_with_scope!('Target', field, 'B')
+    options = relation_subject_request("Subject,Tracker,Product,Related\nSource,Defect,A,Target\n", 'upsert', nil)
+    options[:fields_map]['Product'] = "custom_field-#{field.name}"
+    options.merge!(unique_scope_fields: ["custom_field-#{field.name}"],
+                   relation_scope_mode: 'inherit', relation_tracker_mode: 'all', relation_target_mode: 'all')
+    post :result, params: options
+    assert_equal [first.id], source.reload.relations.map { |rel| rel.other_issue(source).id }
+    assert_empty second.reload.relations
+  end
+
+  test 'selected target trackers apply even when resolving real IDs' do
+    target = create_issue!(@project, @user, tracker: relation_other_tracker)
+    options = relation_request("ID,Related\n#{@issue.id},#{target.id}\n",
+      relation_tracker_mode: 'selected', relation_tracker_ids: [@tracker.id.to_s])
+    post :result, params: options
+    assert_empty @issue.reload.relations
+  end
+
+  test 'selected tracker mode links only targets within the selected set' do
+    selected = relation_other_tracker
+    target = create_issue!(@project, @user, tracker: selected, subject: 'Target')
+    ignored = create_issue!(@project, @user, tracker: @tracker, subject: 'Target')
+    options = relation_subject_request("Subject,Tracker,Related\n#{@issue.subject},Defect,Target\n", 'upsert', nil)
+    options.merge!(relation_tracker_mode: 'selected', relation_tracker_ids: [selected.id.to_s], relation_target_mode: 'all')
+    post :result, params: options
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+    assert_empty ignored.reload.relations
+  end
+
+  test 'unique mode reports true ambiguity after removing self' do
+    first = create_issue!(@project, @user, tracker: @tracker, subject: 'Target')
+    second = create_issue!(@project, @user, tracker: relation_other_tracker, subject: 'Target')
+    options = relation_subject_request("Subject,Tracker,Related\n#{@issue.subject},Defect,Target\n", 'upsert', nil)
+    options.merge!(relation_tracker_mode: 'all', relation_target_mode: 'single')
+    post :result, params: options
+    assert_empty @issue.reload.relations
+    assert assigns(:messages).any? { |message| message.include?("##{first.id}") && message.include?("##{second.id}") }
+  end
+
+  test 'extracted identifiers support all targets and exclude the source' do
+    @issue.update!(subject: 'Source | K-001')
+    target = create_issue!(@project, @user, tracker: relation_other_tracker, subject: 'Target | K-001')
+    ignored = create_issue!(@project, @user, tracker: @tracker, subject: 'Wrong | K-0010')
+    options = relation_subject_request("Subject,Tracker,Related\nSource | K-001,Defect,K-001\n", 'upsert', nil)
+    options.merge!(extract_unique_value: '1', unique_value_separator: '|',
+      relation_tracker_mode: 'all', relation_target_mode: 'all')
+    post :result, params: options
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+    assert_empty ignored.reload.relations
+  end
+
+  test 'invalid empty tracker selection aborts before importing any issues' do
+    options = relation_subject_request("Subject,Tracker,Related\nNew task,Defect,Target\n", 'create', nil)
+    options.merge!(relation_tracker_mode: 'selected', relation_tracker_ids: [])
+    assert_no_difference ['Issue.count', 'IssueRelation.count'] do
+      post :result, params: options
+    end
+    assert flash[:error].present?
+  end
+
+  test 'invalid independent boundary aborts before importing any issues' do
+    options = relation_subject_request("Subject,Tracker,Related\nNew task,Defect,Target\n", 'create', nil)
+    options.merge!(relation_scope_mode: 'custom', relation_scope_fields: ['custom_field-Nonexistent'])
+    assert_no_difference ['Issue.count', 'IssueRelation.count'] do
+      post :result, params: options
+    end
+    assert flash[:error].present?
+  end
+
+  test 'all mode skips existing links and self references' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    IssueRelation.create!(issue_from: @issue, issue_to: target, relation_type: 'relates')
+    options = relation_request("ID,Related\n#{@issue.id},\"#{@issue.id},#{target.id}\"\n", relation_target_mode: 'all')
+    assert_no_difference 'IssueRelation.count' do
+      post :result, params: options
+    end
+  end
+
   test 'relation CLEAR removes only the mapped type including inverse direction' do
     target = create_issue!(@project, @user, tracker: @tracker)
     other = create_issue!(@project, @user, tracker: @tracker)

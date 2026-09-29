@@ -168,14 +168,6 @@
       <%= importer_hint(l(:label_unique_scope_tracker_info)) %>
     </div>
     
-    <div id="relation_options">
-      <label>
-        <%= check_box_tag 'relations_cross_tracker', true, false %>
-        <%= l(:label_relations_cross_tracker) %>
-      </label>
-      <%= importer_hint(l(:label_relations_cross_tracker_info)) %>
-    </div>
-
     <div id="extract_unique_value_wrapper">
       <label>
         <%= check_box_tag "extract_unique_value", true, false %>
@@ -273,6 +265,41 @@
     </div>
   </fieldset>
 
+  <fieldset class="box" id="relation_options">
+    <legend><%= l(:label_relation_policy) %> <%= importer_hint(l(:label_relation_policy_info)) %></legend>
+    <div class="rule-row">
+      <label class="rule-label" for="relation_tracker_mode"><%= l(:label_relation_trackers) %></label>
+      <%= select_tag 'relation_tracker_mode', options_for_select([
+        [l(:label_relation_tracker_same), 'same'], [l(:label_relation_tracker_all), 'all'],
+        [l(:label_relation_tracker_selected), 'selected']], 'same') %>
+      <%= importer_hint(l(:label_relation_trackers_info)) %>
+    </div>
+    <div class="rule-row" id="relation_tracker_ids_wrapper" style="display: none;">
+      <label class="rule-label" for="relation_tracker_ids"><%= l(:label_relation_tracker_selected) %></label>
+      <%= select_tag 'relation_tracker_ids[]', options_from_collection_for_select(@project.trackers, :id, :name),
+        id: 'relation_tracker_ids', multiple: true, size: 4, disabled: true %>
+    </div>
+    <div class="rule-row">
+      <label class="rule-label" for="relation_scope_mode"><%= l(:label_relation_scope) %></label>
+      <%= select_tag 'relation_scope_mode', options_for_select([
+        [l(:label_relation_scope_inherit), 'inherit'], [l(:label_relation_scope_extend), 'extend'],
+        [l(:label_relation_scope_replace), 'replace'],
+        [l(:label_relation_scope_none), 'none']], 'inherit') %>
+      <%= importer_hint(l(:label_relation_scope_info)) %>
+    </div>
+    <div class="rule-row" id="relation_scope_fields_wrapper" style="display: none;">
+      <label class="rule-label" for="relation_scope_fields"><%= l(:label_relation_scope_fields) %></label>
+      <%= select_tag 'relation_scope_fields[]', options_for_select(@scope_attrs, disabled: @disabled_scope_attrs),
+        id: 'relation_scope_fields', multiple: true, size: 4, disabled: true %>
+    </div>
+    <div class="rule-row">
+      <label class="rule-label" for="relation_target_mode"><%= l(:label_relation_targets) %></label>
+      <%= select_tag 'relation_target_mode', options_for_select([
+        [l(:label_relation_target_single), 'single'], [l(:label_relation_target_all), 'all']], 'single') %>
+      <%= importer_hint(l(:label_relation_targets_info)) %>
+    </div>
+  </fieldset>
+
   <%= submit_tag l(:button_redmine_importer_submit), :id => 'import-button' %>
   <br/>
 <% end %>
@@ -337,8 +364,7 @@
 
       // nothing is written to the issues while they are being deleted, and
       // no user is read out of the file either
-      $('#relation_options').toggleClass('importer-disabled', deleting);
-      $('#relations_cross_tracker').prop('disabled', deleting);
+
       $('#write_options').toggleClass('importer-disabled', deleting);
       $('#send_emails, #add_categories, #clear_empty_cells, #use_anonymous')
         .prop('disabled', deleting);
@@ -440,11 +466,28 @@
     }
     $('#default_tracker, .import-default-status').on('change', refreshRequiredDefaults);
 
+    function refreshRelationRules() {
+      var deleting = deleteMode();
+      var byId = importByIssueId() || uniqueColumnMapping() === 'standard_field-id';
+      var selectedTrackers = $('#relation_tracker_mode').val() === 'selected';
+      var scopeMode = $('#relation_scope_mode').val();
+      var customScope = (scopeMode === 'extend' || scopeMode === 'replace') && !byId;
+      $('#relation_options').toggleClass('importer-disabled', deleting);
+      $('#relation_tracker_mode, #relation_target_mode').prop('disabled', deleting);
+      $('#relation_scope_mode').prop('disabled', deleting || byId);
+      $('#relation_tracker_ids_wrapper').toggle(selectedTrackers);
+      $('#relation_tracker_ids').prop('disabled', deleting || !selectedTrackers);
+      $('#relation_scope_fields_wrapper').toggle(customScope);
+      $('#relation_scope_fields').prop('disabled', deleting || !customScope);
+    }
+    $('#relation_tracker_mode, #relation_scope_mode').on('change', refreshRelationRules);
+
     function refreshImportRules() {
       refreshRequiredDefaults();
       toggleIdColumnWarning();
       toggleUniqueMatching();
       toggleModes();
+      refreshRelationRules();
     }
 
     $('#use_issue_id, #unique_field, #extract_unique_value, #import_mode')
