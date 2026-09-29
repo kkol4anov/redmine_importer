@@ -9,6 +9,164 @@ class ImporterControllerTest < ActionController::TestCase
 
   fixtures :users
 
+  test 'relation CLEAR removes only the mapped type including inverse direction' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    other = create_issue!(@project, @user, tracker: @tracker)
+    removed = IssueRelation.create!(issue_from: target, issue_to: @issue, relation_type: 'duplicates')
+    kept = IssueRelation.create!(issue_from: @issue, issue_to: other, relation_type: 'relates')
+    options = relation_request("ID,Related\n#{@issue.id},[CLEAR]\n")
+    options[:fields_map]['Related'] = 'issue_relation-duplicated'
+    post :result, params: options
+    assert_response :success
+    assert_not IssueRelation.exists?(removed.id)
+    assert IssueRelation.exists?(kept.id)
+  end
+
+  test 'blank relation cells preserve links by default' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    relation = IssueRelation.create!(issue_from: @issue, issue_to: target, relation_type: 'relates')
+    post :result, params: relation_request("ID,Related\n#{@issue.id},\n")
+    assert IssueRelation.exists?(relation.id)
+  end
+
+  test 'clear empty cells applies only to mapped relation types' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    relation = IssueRelation.create!(issue_from: @issue, issue_to: target, relation_type: 'relates')
+    post :result, params: relation_request("ID,Related\n#{@issue.id},\n", clear_empty_cells: '1')
+    assert_not IssueRelation.exists?(relation.id)
+    assert_includes assigns(:updated_issue_ids), @issue.id
+  end
+
+  test 'relation custom field lookup is independent of source ID matching' do
+    field = create_scope_field!('Relation code', ['X1'])
+    tracker = relation_other_tracker
+    tracker.custom_fields << field
+    target = create_issue_with_scope!('Existing target', field, 'X1')
+    target.update!(tracker: tracker)
+    post :result, params: relation_request("ID,Related\n#{@issue.id},X1\n",
+      relation_match_field: "cf_#{field.id}", relations_cross_tracker: '1')
+    assert_response :success
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+  end
+
+  test 'relation tracker option does not broaden source row matching' do
+    tracker = relation_other_tracker
+    target = create_issue!(@project, @user, tracker: tracker, subject: 'Other target')
+    same_name = create_issue!(@project, @user, tracker: tracker, subject: @issue.subject)
+    post :result, params: relation_subject_request("Subject,Tracker,Related\n#{@issue.subject},Defect,Other target\n", 'upsert', '1')
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+    assert_empty same_name.reload.relations
+  end
+
+  test 'relation cross tracker lookup is opt in for a unique value' do
+    target = create_issue!(@project, @user, tracker: relation_other_tracker, subject: 'Other target')
+    post :result, params: relation_request("ID,Related\n#{@issue.id},Other target\n", relation_match_field: 'subject')
+    assert_empty @issue.reload.relations
+    assert assigns(:messages).any? { |message| message.include?('Other target') }
+  end
+
+  test 'new issues link across trackers even when the target is later in CSV' do
+    relation_other_tracker
+    post :result, params: relation_subject_request("Subject,Tracker,Related\nNew source,Defect,New target\nNew target,Feature,\n", 'create', '1')
+    source = Issue.find_by!(subject: 'New source')
+    target = Issue.find_by!(subject: 'New target')
+    assert_equal [target.id], source.relations.map { |rel| rel.other_issue(source).id }
+  end
+
+  test 'relation lookup rejects ambiguity across trackers after all rows import' do
+    relation_other_tracker
+    post :result, params: relation_subject_request("Subject,Tracker,Related\nNew source,Defect,Repeated\nRepeated,Defect,\nRepeated,Feature,\n", 'create', '1')
+    assert_empty Issue.find_by!(subject: 'New source').relations
+    assert assigns(:messages).any? { |message| message.include?('Repeated') }
+  end
+
+  test 'all relation clearing precedes all additions regardless of row order' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    post :result, params: relation_request("ID,Related\n#{@issue.id},#{target.id}\n#{target.id},[CLEAR]\n")
+    assert_equal [target.id], @issue.reload.relations.map { |rel| rel.other_issue(@issue).id }
+  end
+
+  test 'symmetric relation references in both rows create only one link' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    assert_difference 'IssueRelation.count', 1 do
+      post :result, params: relation_request("ID,Related\n#{@issue.id},#{target.id}\n#{target.id},#{@issue.id}\n")
+    end
+  end
+
+  test 'relations require manage issue relations permission' do
+    @role.update!(permissions: @role.permissions - [:manage_issue_relations])
+    target = create_issue!(@project, @user, tracker: @tracker)
+    relation = IssueRelation.create!(issue_from: @issue, issue_to: target, relation_type: 'relates')
+    post :result, params: relation_request("ID,Related\n#{@issue.id},[CLEAR]\n")
+    assert IssueRelation.exists?(relation.id)
+  end
+
+  test 'explicit relation field supports creation without an import unique column' do
+    target = create_issue!(@project, @user, tracker: @tracker, subject: 'Existing target')
+    @iip.update!(csv_data: "Subject,Related\nFresh source,Existing target\n")
+    post :result, params: {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: 'create', default_tracker: @tracker.id, relation_match_field: 'subject',
+      fields_map: { 'Subject' => 'standard_field-subject', 'Related' => 'issue_relation-relates' }
+    }
+    source = Issue.find_by!(subject: 'Fresh source')
+    assert_equal [target.id], source.relations.map { |rel| rel.other_issue(source).id }
+  end
+
+  test 'duplicate file-local IDs never silently select a relation target' do
+    @iip.update!(csv_data: "ID,Subject,Related\n1,Source,2\n2,First,\n2,Second,\n")
+    post :result, params: {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: 'create', default_tracker: @tracker.id, unique_field: 'ID',
+      fields_map: { 'ID' => 'standard_field-id', 'Subject' => 'standard_field-subject',
+                    'Related' => 'issue_relation-relates' }
+    }
+    assert_empty Issue.find_by!(subject: 'Source').relations
+    assert assigns(:messages).any?
+  end
+
+  test 'an already existing relation is not duplicated on import' do
+    target = create_issue!(@project, @user, tracker: @tracker)
+    IssueRelation.create!(issue_from: @issue, issue_to: target, relation_type: 'relates')
+    assert_no_difference 'IssueRelation.count' do
+      post :result, params: relation_request("ID,Related\n#{@issue.id},#{target.id}\n")
+    end
+  end
+
+  test 'an invalid relation field aborts before writing issues' do
+    options = relation_request("ID,Related\n#{@issue.id},X1\n", relation_match_field: 'private_notes')
+    assert_no_difference ['IssueRelation.count', 'Journal.count'] do
+      post :result, params: options
+    end
+    assert flash[:error].present?
+  end
+
+  def relation_other_tracker
+    tracker = Tracker.create!(name: 'Feature', default_status: @tracker.default_status)
+    @project.trackers << tracker
+    tracker
+  end
+
+  def relation_request(csv, options = {})
+    @iip.update!(csv_data: csv)
+    {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: 'upsert', use_issue_id: '1', default_tracker: @tracker.id,
+      fields_map: { 'ID' => 'standard_field-id', 'Related' => 'issue_relation-relates' }
+    }.merge(options)
+  end
+
+  def relation_subject_request(csv, mode, cross_tracker)
+    @iip.update!(csv_data: csv)
+    {
+      import_timestamp: @iip.timestamp, project_id: @project.identifier,
+      import_mode: mode, default_tracker: @tracker.id, unique_field: 'Subject',
+      unique_scope_tracker: '1', relations_cross_tracker: cross_tracker,
+      fields_map: { 'Subject' => 'standard_field-subject', 'Tracker' => 'standard_field-tracker',
+                    'Related' => 'issue_relation-relates' }
+    }
+  end
+
   test 'missing product aborts the entire file before parent and relation writes' do
     field = create_scope_field!('Required product', %w[Design Production])
     field.update!(is_required: true)
@@ -283,7 +441,7 @@ class ImporterControllerTest < ActionController::TestCase
     @tracker.save!
     @project.trackers << @tracker
     @project.save!
-    @role = Role.create! name: 'ADMIN', permissions: %i[import view_issues]
+    @role = Role.create! name: 'ADMIN', permissions: %i[import view_issues manage_issue_relations]
     @user = create_user!(@role, @project)
     @iip = create_iip_for_multivalues!(@user, @project)
     @issue = create_issue!(@project, @user, { id: 70_385, tracker: @tracker })

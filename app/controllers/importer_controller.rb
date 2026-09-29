@@ -195,6 +195,12 @@ class ImporterController < ApplicationController
       @attrs.push([l_or_humanize(rinfo[:name]), "issue_relation-#{rtype}"])
     end
     @attrs.sort!
+    @relation_match_attrs = [[l(:label_relation_match_same), 'same'],
+                             [l(:field_id), 'issue_id'],
+                             [l(:field_subject), 'subject']]
+    @relation_match_attrs += @project.all_issue_custom_fields.select(&:is_filter?).map do |field|
+      [field.name, "cf_#{field.id}"]
+    end
 
     # Custom fields that can be used to narrow the scope in which
     # the values of the unique column are matched.
@@ -407,6 +413,8 @@ class ImporterController < ApplicationController
 
       IssueRelation::TYPES.each_key do |t|
         next if @attrs_map["issue_relation-#{t}"].blank?
+        next if params[:relation_match_field].present? && params[:relation_match_field] != 'same'
+        next if relation_columns_clear_only?(iip)
 
         flash[:error] = l(:text_rmi_specify_unique_field_for_column,
                           column: l("label_#{t}".to_sym))
@@ -445,6 +453,8 @@ class ImporterController < ApplicationController
 
     # if error is full, NOP
     return if flash[:error].present?
+
+    return unless configure_relation_matching(unique_attr)
 
     @diagnostic_unique_field = unique_field
     @diagnostic_unique_attr = unique_attr
@@ -656,54 +666,9 @@ class ImporterController < ApplicationController
           end
         end
 
-        # Issue relations
-        IssueRelation::TYPES.each_pair do |rtype, _rinfo|
-          raw_value = row[@attrs_map["issue_relation-#{rtype}"]]
-          next if raw_value.blank?
-
-          raw_value.split(',').map(&:strip).reject(&:blank?).each do |other_value|
-            begin
-              # When the unique column is mapped to the id and use_issue_id is
-              # false, use cache-based lookup to support deferred reference
-              # resolution.
-              if csv_internal_ids?
-                other_key = unique_attr_cache_key(other_value, row, reference: true)
-                other_issue = other_key && @issue_by_unique_attr[other_key]
-                unless other_issue
-                  # Target not in cache yet - register callback for deferred creation
-                  register_deferred_reference(other_value, :add_relation,
-                                              row, unique_field, rtype,
-                                              column: @attrs_map["issue_relation-#{rtype}"])
-                  next
-                end
-              else
-                other_issue = issue_for_unique_attr(unique_attr, other_value, row,
-                                                    reference: true)
-              end
-
-              already_related = issue.relations.any? do |r|
-                (r.other_issue(issue).id == other_issue.id) \
-                  && (r.relation_type_for(issue) == rtype)
-              end
-              next if already_related
-
-              relation = IssueRelation.new(issue_from: issue,
-                                          issue_to: other_issue,
-                                          relation_type: rtype)
-              unless relation.save
-                @messages << "Warning: Failed to create relation: #{relation.errors.full_messages.join(', ')}"
-              end
-            rescue NoIssueForUniqueValue
-              # Register callback for deferred relation creation
-              # Target issue may appear later in CSV
-              register_deferred_reference(other_value, :add_relation,
-                                          row, unique_field, rtype,
-                                          column: @attrs_map["issue_relation-#{rtype}"])
-            rescue MultipleIssuesForUniqueValue
-              @messages << "Warning: Multiple matches for relation target '#{other_value}'"
-            end
-          end
-        end
+        # Resolve relations after all successful rows are saved. A separate
+        # index prevents the update cache from hiding ambiguous relation keys.
+        @relation_rows << { issue_id: issue.id, row: row }
 
         journal
 
@@ -728,6 +693,8 @@ class ImporterController < ApplicationController
     end # do
 
     report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
+
+    process_import_relations(unique_field)
 
     # Warn about any unresolved deferred references
     @deferred_callbacks.warn_unresolved
@@ -1658,6 +1625,7 @@ class ImporterController < ApplicationController
   end
 
   def init_globals
+    @relation_rows = []
     @file_validation_failed = false
     @required_validation_failed = false
     @file_validation_results = []
@@ -1911,8 +1879,8 @@ class ImporterController < ApplicationController
   # Looks up the issues whose text field contains the identifier
   # (SQL LIKE '%code%'), then keeps only those whose extracted value matches
   # the identifier exactly.
-  def issues_by_extracted_value(unique_attr, code, row_data)
-    query = build_unique_query(unique_attr, '~', code, row_data)
+  def issues_by_extracted_value(unique_attr, code, row_data, scope_filters: nil)
+    query = build_unique_query(unique_attr, '~', code, row_data, scope_filters: scope_filters)
 
     candidates = Issue.joins([:project])
                       .includes(%i[assigned_to status tracker project priority
@@ -1938,6 +1906,151 @@ class ImporterController < ApplicationController
       issue.custom_field_value(unique_attr.delete_prefix('cf_').to_i)
     else
       issue.public_send(unique_attr)
+    end
+  end
+
+  # Relations have their own lookup policy; row matching and parents retain
+  # their original tracker boundary and caches.
+  def configure_relation_matching(unique_attr)
+    return true if @delete_mode
+    return true unless IssueRelation::TYPES.keys.any? { |type| @attrs_map["issue_relation-#{type}"].present? }
+
+    selected = params[:relation_match_field].presence || 'same'
+    @relation_match_same = selected == 'same'
+    @relation_match_attr = @relation_match_same ? unique_attr : selected
+    allowed = ['issue_id', 'subject'] + @project.all_issue_custom_fields.select(&:is_filter?).map { |cf| "cf_#{cf.id}" }
+    usable = @relation_match_attr.nil? || @relation_match_attr == 'issue_id' ||
+             new_importer_query.available_filters.key?(@relation_match_attr)
+    unless usable && (@relation_match_same || allowed.include?(selected))
+      flash[:error] = l(:error_relation_match_field)
+      return false
+    end
+    true
+  end
+
+  def relation_columns_clear_only?(iip)
+    columns = IssueRelation::TYPES.keys.map { |type| @attrs_map["issue_relation-#{type}"] }.compact
+    csv_rows(iip, csv_options(iip)).all? do |row|
+      columns.all? { |column| row[column].blank? || clear_marker?(row[column]) }
+    end
+  end
+
+  def relation_scope_filters(row)
+    # IDs are globally unique. For other fields preserve the selected custom
+    # scope, but let the relation option independently relax the tracker.
+    return [] if @relation_match_attr == 'issue_id'
+    filters = unique_scope_filters(row).reject { |filter, _operator, _values| filter == @relation_match_attr }
+    if params[:relations_cross_tracker].present?
+      filters = filters.reject { |filter, _operator, _values| filter == 'tracker_id' }
+    elsif filters.none? { |filter, _operator, _values| filter == 'tracker_id' }
+      field = tracker_scope_field
+      # ID row matching disables the tracker scope widget, but a separate
+      # relation field should still be restricted unless explicitly enabled.
+      field ||= { column: @attrs_map['standard_field-tracker'], default: params[:default_tracker] }
+      tracker_id = tracker_scope_id(row, field)
+      filters = filters + [['tracker_id', '=', [tracker_id.to_s]]] if tracker_id.present?
+    end
+    filters
+  end
+
+  def relation_internal_key(value)
+    extract_unique_value(value, reference: true)
+  end
+
+  def relation_target(value, row, internal_index)
+    if @relation_match_same && csv_internal_ids?
+      ids = internal_index[relation_internal_key(value)] || []
+      candidates = Issue.visible.where(id: ids).to_a
+    elsif @relation_match_attr == 'issue_id'
+      candidates = value.match?(/\A[0-9]+\z/) ? Issue.visible.where(id: value).limit(2).to_a : []
+    elsif @relation_match_same && extract_unique_value?
+      code = extract_unique_value(value, reference: true)
+      candidates = code.nil? ? [] : issues_by_extracted_value(@relation_match_attr, code, row,
+        scope_filters: relation_scope_filters(row)).select(&:visible?)
+      # A capped search cannot establish uniqueness safely.
+      raise MultipleIssuesForUniqueValue if @too_many_candidates.include?(code)
+    else
+      query = build_unique_query(@relation_match_attr, '=', value, row,
+        scope_filters: relation_scope_filters(row))
+      candidates = Issue.visible.joins(:project).where(query.statement).limit(2).to_a
+    end
+    raise NoIssueForUniqueValue if candidates.empty?
+    raise MultipleIssuesForUniqueValue if candidates.size > 1
+    candidates.first
+  end
+
+  def record_relation_change(issue)
+    result = @row_results.reverse.find { |entry| entry[:issue_id] == issue.id }
+    return unless result && result[:status] == :unchanged
+    result[:status] = :updated
+    @unchanged_count -= 1
+    @updated_issue_ids |= [issue.id]
+  end
+
+  def process_import_relations(unique_field)
+    columns = IssueRelation::TYPES.keys.map { |type| [type, @attrs_map["issue_relation-#{type}"]] }
+                               .reject { |_type, column| column.blank? }
+    return if columns.empty?
+
+    internal_index = Hash.new { |hash, key| hash[key] = [] }
+    if @relation_match_same && csv_internal_ids?
+      @relation_rows.each do |entry|
+        key = relation_internal_key(entry[:row][unique_field])
+        internal_index[key] |= [entry[:issue_id]] if key
+      end
+    end
+
+    # Perform ALL explicit clearing before creating ANY links: the result
+    # does not depend on whether the other endpoint appears later in the file.
+    [:clear, :add].each do |phase|
+      @relation_rows.each do |entry|
+        report_progress
+        issue = Issue.find_by_id(entry[:issue_id])
+        next unless issue
+        columns.each do |type, column|
+          raw = entry[:row][column]
+          clearing = clear_marker?(raw) || (@clear_empty_cells && raw.blank?)
+          next if phase == :clear ? !clearing : (clearing || raw.blank?)
+          unless User.current.allowed_to?(:manage_issue_relations, issue.project) && issue.visible?
+            @messages << l(:warning_relation_permission, id: issue.id) if phase == :clear || !clearing
+            next
+          end
+
+          if phase == :clear
+            issue.relations.select { |relation| relation.relation_type_for(issue) == type }.each do |relation|
+              unless relation.other_issue(issue).visible?
+                @messages << l(:warning_relation_permission, id: issue.id)
+                next
+              end
+              if relation.destroy
+                record_relation_change(issue)
+              else
+                @messages << l(:warning_relation_write, id: issue.id, details: relation.errors.full_messages.join(', '))
+              end
+            end
+          else
+            raw.to_s.split(',').map(&:strip).reject(&:blank?).uniq.each do |value|
+              begin
+                target = relation_target(value, entry[:row], internal_index)
+                # Read fresh relations: inverse/symmetric links may have been
+                # inserted while processing a different source row.
+                issue.reload
+                next if issue.relations.any? { |relation| relation.other_issue(issue).id == target.id && relation.relation_type_for(issue) == type }
+                relation = IssueRelation.new(issue_from: issue, issue_to: target, relation_type: type)
+                if relation.save
+                  record_relation_change(issue)
+                else
+                  @messages << l(:warning_relation_write, id: issue.id, details: relation.errors.full_messages.join(', '))
+                end
+              rescue NoIssueForUniqueValue
+                @messages << l(:warning_relation_missing, id: issue.id, value: value, column: column)
+              rescue MultipleIssuesForUniqueValue
+                @messages << l(:warning_relation_ambiguous, id: issue.id, value: value, column: column)
+              end
+            end
+          end
+        end
+      end
     end
   end
 
@@ -2677,7 +2790,7 @@ class ImporterController < ApplicationController
 
   # Builds the importer query for the unique value, narrowed down with the
   # selected scope custom fields.
-  def build_unique_query(unique_attr, operator, value, row_data)
+  def build_unique_query(unique_attr, operator, value, row_data, scope_filters: nil)
     query = new_importer_query
     query.add_filter('status_id', '*', [1])
     query.add_filter(unique_attr, operator, [value])
@@ -2688,7 +2801,7 @@ class ImporterController < ApplicationController
     end
 
     # narrow the matching scope down with the selected custom fields
-    unique_scope_filters(row_data).each do |filter, filter_operator, values|
+    (scope_filters || unique_scope_filters(row_data)).each do |filter, filter_operator, values|
       query.add_filter(filter, filter_operator, values)
 
       unless query.filters.key?(filter)
