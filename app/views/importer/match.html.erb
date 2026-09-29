@@ -169,13 +169,11 @@
     </div>
     
     <div id="relation_options">
-      <p class="info"><%= l(:label_relation_matching_info) %></p>
       <label>
         <%= check_box_tag 'relations_cross_tracker', true, false %>
         <%= l(:label_relations_cross_tracker) %>
       </label>
       <%= importer_hint(l(:label_relations_cross_tracker_info)) %>
-      <p class="info"><%= l(:label_relation_clear_info) %></p>
     </div>
 
     <div id="extract_unique_value_wrapper">
