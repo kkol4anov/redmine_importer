@@ -6,6 +6,7 @@ require 'tempfile'
 require_relative '../../lib/redmine_importer/xlsx_reader'
 require_relative '../../lib/redmine_importer/required_defaults'
 require_relative '../../lib/redmine_importer/required_preflight'
+require_relative '../../lib/redmine_importer/relation_targets'
 
 class MultipleIssuesForUniqueValue < RuntimeError
   attr_accessor :issue_ids
@@ -407,6 +408,7 @@ class ImporterController < ApplicationController
 
       IssueRelation::TYPES.each_key do |t|
         next if @attrs_map["issue_relation-#{t}"].blank?
+        next if relation_columns_clear_only?(iip)
 
         flash[:error] = l(:text_rmi_specify_unique_field_for_column,
                           column: l("label_#{t}".to_sym))
@@ -445,6 +447,10 @@ class ImporterController < ApplicationController
 
     # if error is full, NOP
     return if flash[:error].present?
+
+    # Relations always use the same identifier as the imported rows.
+    @relation_match_attr = unique_attr
+    return unless configure_relation_policy
 
     @diagnostic_unique_field = unique_field
     @diagnostic_unique_attr = unique_attr
@@ -656,54 +662,9 @@ class ImporterController < ApplicationController
           end
         end
 
-        # Issue relations
-        IssueRelation::TYPES.each_pair do |rtype, _rinfo|
-          raw_value = row[@attrs_map["issue_relation-#{rtype}"]]
-          next if raw_value.blank?
-
-          raw_value.split(',').map(&:strip).reject(&:blank?).each do |other_value|
-            begin
-              # When the unique column is mapped to the id and use_issue_id is
-              # false, use cache-based lookup to support deferred reference
-              # resolution.
-              if csv_internal_ids?
-                other_key = unique_attr_cache_key(other_value, row, reference: true)
-                other_issue = other_key && @issue_by_unique_attr[other_key]
-                unless other_issue
-                  # Target not in cache yet - register callback for deferred creation
-                  register_deferred_reference(other_value, :add_relation,
-                                              row, unique_field, rtype,
-                                              column: @attrs_map["issue_relation-#{rtype}"])
-                  next
-                end
-              else
-                other_issue = issue_for_unique_attr(unique_attr, other_value, row,
-                                                    reference: true)
-              end
-
-              already_related = issue.relations.any? do |r|
-                (r.other_issue(issue).id == other_issue.id) \
-                  && (r.relation_type_for(issue) == rtype)
-              end
-              next if already_related
-
-              relation = IssueRelation.new(issue_from: issue,
-                                          issue_to: other_issue,
-                                          relation_type: rtype)
-              unless relation.save
-                @messages << "Warning: Failed to create relation: #{relation.errors.full_messages.join(', ')}"
-              end
-            rescue NoIssueForUniqueValue
-              # Register callback for deferred relation creation
-              # Target issue may appear later in CSV
-              register_deferred_reference(other_value, :add_relation,
-                                          row, unique_field, rtype,
-                                          column: @attrs_map["issue_relation-#{rtype}"])
-            rescue MultipleIssuesForUniqueValue
-              @messages << "Warning: Multiple matches for relation target '#{other_value}'"
-            end
-          end
-        end
+        # Resolve relations after all successful rows are saved. A separate
+        # index prevents the update cache from hiding ambiguous relation keys.
+        @relation_rows << { issue_id: issue.id, row: row }
 
         journal
 
@@ -728,6 +689,8 @@ class ImporterController < ApplicationController
     end # do
 
     report_progress(stage: ImportInProgress::STAGE_FINALIZING, force: true)
+
+    process_import_relations(unique_field)
 
     # Warn about any unresolved deferred references
     @deferred_callbacks.warn_unresolved
@@ -1131,15 +1094,15 @@ class ImporterController < ApplicationController
   # Returns [] when the scope is not applicable: the issues are matched by
   # their id (id is globally unique, no scope is needed) or nothing selected.
   # Returns nil and sets flash[:error] when the selection is not usable.
-  def build_unique_scope_fields(raw_unique_attr)
+  def build_unique_scope_fields(raw_unique_attr, selected_keys: nil, include_tracker: true)
     # the id of an issue is unique by itself, no scope is needed (and the
     # tracker of the row may well be the new tracker of an existing issue)
-    return [] if use_issue_id
+    return [] if use_issue_id && selected_keys.nil?
     return [] if raw_unique_attr.blank? || raw_unique_attr == 'standard_field-id'
 
-    fields = [tracker_scope_field].compact
+    fields = include_tracker ? [tracker_scope_field].compact : []
 
-    selected = Array(params[:unique_scope_fields]).reject(&:blank?).uniq
+    selected = Array(selected_keys || params[:unique_scope_fields]).reject(&:blank?).uniq
     return fields if selected.empty?
 
     query = new_importer_query
@@ -1194,10 +1157,10 @@ class ImporterController < ApplicationController
 
   # Query filters ([filter_name, operator, values]) built from the values
   # of the scope fields in the given row.
-  def unique_scope_filters(row)
-    return [] if @unique_scope_fields.blank? || row.nil?
+  def unique_scope_filters(row, fields: @unique_scope_fields)
+    return [] if fields.blank? || row.nil?
 
-    @unique_scope_fields.filter_map do |field|
+    fields.filter_map do |field|
       if field[:tracker]
         tracker_id = tracker_scope_id(row, field)
         next if tracker_id.nil?
@@ -1658,6 +1621,7 @@ class ImporterController < ApplicationController
   end
 
   def init_globals
+    @relation_rows = []
     @file_validation_failed = false
     @required_validation_failed = false
     @file_validation_results = []
@@ -1911,8 +1875,8 @@ class ImporterController < ApplicationController
   # Looks up the issues whose text field contains the identifier
   # (SQL LIKE '%code%'), then keeps only those whose extracted value matches
   # the identifier exactly.
-  def issues_by_extracted_value(unique_attr, code, row_data)
-    query = build_unique_query(unique_attr, '~', code, row_data)
+  def issues_by_extracted_value(unique_attr, code, row_data, scope_filters: nil)
+    query = build_unique_query(unique_attr, '~', code, row_data, scope_filters: scope_filters)
 
     candidates = Issue.joins([:project])
                       .includes(%i[assigned_to status tracker project priority
@@ -1938,6 +1902,196 @@ class ImporterController < ApplicationController
       issue.custom_field_value(unique_attr.delete_prefix('cf_').to_i)
     else
       issue.public_send(unique_attr)
+    end
+  end
+
+  def relation_columns_clear_only?(iip)
+    columns = IssueRelation::TYPES.keys.map { |type| @attrs_map["issue_relation-#{type}"] }.compact
+    csv_rows(iip, csv_options(iip)).all? do |row|
+      columns.all? { |column| row[column].blank? || clear_marker?(row[column]) }
+    end
+  end
+
+  # Relation policy changes neither update matching nor parent matching.
+  # Validate before saving any rows, including hand-made and saved requests.
+  def configure_relation_policy
+    return true if @delete_mode
+    return true unless IssueRelation::TYPES.keys.any? { |type| @attrs_map["issue_relation-#{type}"].present? }
+
+    @relation_target_mode = params[:relation_target_mode].presence || 'single'
+    @relation_scope_mode = params[:relation_scope_mode].presence || 'inherit'
+    # Previously saved custom scopes meant replacement.
+    @relation_scope_mode = 'replace' if @relation_scope_mode == 'custom'
+    # Old open forms retain their previous cross-tracker choice.
+    @relation_tracker_mode = params[:relation_tracker_mode].presence ||
+                             (params[:relations_cross_tracker].present? || @relation_match_attr == 'issue_id' ? 'all' : 'same')
+    unless %w[single all].include?(@relation_target_mode) &&
+           %w[inherit extend replace none].include?(@relation_scope_mode) &&
+           %w[same all selected].include?(@relation_tracker_mode)
+      flash[:error] = l(:error_relation_policy)
+      return false
+    end
+
+    @relation_tracker_ids = []
+    if @relation_tracker_mode == 'selected'
+      ids = Array(params[:relation_tracker_ids]).reject(&:blank?).map(&:to_s).uniq
+      allowed = @project.trackers.pluck(:id).map(&:to_s)
+      if ids.empty? || (ids - allowed).any?
+        flash[:error] = l(:error_relation_trackers)
+        return false
+      end
+      @relation_tracker_ids = ids.map(&:to_i)
+    end
+
+    @relation_scope_fields = case @relation_scope_mode
+    when 'inherit'
+      Array(@unique_scope_fields).reject { |field| field[:tracker] }
+    when 'none'
+      []
+    when 'extend', 'replace'
+      keys = Array(params[:relation_scope_fields]).reject(&:blank?).uniq
+      if keys.empty?
+        flash[:error] = l(:error_relation_scope_empty)
+        return false
+      end
+      # Use the translated unique field here; the final filter list removes
+      # the identifier itself, which cannot also be a source-value boundary.
+      selected = build_unique_scope_fields(@relation_match_attr, selected_keys: keys, include_tracker: false)
+      return false if flash[:error].present?
+      inherited = @relation_scope_mode == 'extend' ? Array(@unique_scope_fields).reject { |field| field[:tracker] } : []
+      (inherited + selected).uniq { |field| field[:filter] }
+    end
+    flash[:error].blank?
+  end
+
+  def relation_scope_filters(row)
+    unique_scope_filters(row, fields: @relation_scope_fields).reject do |filter, _operator, _values|
+      filter == @relation_match_attr
+    end
+  end
+
+  def relation_internal_key(value)
+    extract_unique_value(value, reference: true)
+  end
+
+  def relation_targets(value, row, internal_index, source)
+    # Exclude self in SQL BEFORE applying any candidate limit or testing
+    # uniqueness. Reuse only immutable identifier rules, never the row cache.
+    scope = Issue.visible.where.not(id: source.id)
+    case @relation_tracker_mode
+    when 'same'
+      scope = scope.where(tracker_id: source.tracker_id)
+    when 'selected'
+      scope = scope.where(tracker_id: @relation_tracker_ids)
+    end
+
+    extractor = nil
+    if csv_internal_ids?
+      scope = scope.where(id: internal_index[relation_internal_key(value)] || [])
+    elsif @relation_match_attr == 'issue_id'
+      scope = scope.where(id: value.match?(/\A[0-9]+\z/) ? value : [])
+    else
+      code = extract_unique_value(value, reference: true)
+      raise RedmineImporter::RelationTargets::Missing if code.nil?
+      query = build_unique_query(@relation_match_attr, extract_unique_value? ? '~' : '=',
+                                 extract_unique_value? ? code : value, row,
+                                 scope_filters: relation_scope_filters(row))
+      scope = scope.joins(:project).where(query.statement)
+      if extract_unique_value?
+        scope = scope.includes(:custom_values) if @relation_match_attr.start_with?('cf_')
+        extractor = lambda do |candidate|
+          extract_unique_value(issue_field_value(candidate, @relation_match_attr)) == code
+        end
+      end
+    end
+    # Native/file IDs already identify a target; custom boundaries apply to
+    # value lookup only. Explicit tracker selection still applies to IDs.
+    RedmineImporter::RelationTargets.resolve(scope, multiple: @relation_target_mode == 'all',
+                                             predicate: extractor)
+  end
+
+  def record_relation_change(issue)
+    result = @row_results.reverse.find { |entry| entry[:issue_id] == issue.id }
+    return unless result && result[:status] == :unchanged
+    result[:status] = :updated
+    @unchanged_count -= 1
+    @updated_issue_ids |= [issue.id]
+  end
+
+  def process_import_relations(unique_field)
+    columns = IssueRelation::TYPES.keys.map { |type| [type, @attrs_map["issue_relation-#{type}"]] }
+                               .reject { |_type, column| column.blank? }
+    return if columns.empty?
+
+    internal_index = Hash.new { |hash, key| hash[key] = [] }
+    if csv_internal_ids?
+      @relation_rows.each do |entry|
+        key = relation_internal_key(entry[:row][unique_field])
+        internal_index[key] |= [entry[:issue_id]] if key
+      end
+    end
+
+    # Perform ALL explicit clearing before creating ANY links: the result
+    # does not depend on whether the other endpoint appears later in the file.
+    [:clear, :add].each do |phase|
+      @relation_rows.each do |entry|
+        report_progress
+        issue = Issue.find_by_id(entry[:issue_id])
+        next unless issue
+        columns.each do |type, column|
+          raw = entry[:row][column]
+          clearing = clear_marker?(raw) || (@clear_empty_cells && raw.blank?)
+          next if phase == :clear ? !clearing : (clearing || raw.blank?)
+          unless User.current.allowed_to?(:manage_issue_relations, issue.project) && issue.visible?
+            @messages << l(:warning_relation_permission, id: issue.id) if phase == :clear || !clearing
+            next
+          end
+
+          if phase == :clear
+            issue.relations.select { |relation| relation.relation_type_for(issue) == type }.each do |relation|
+              unless relation.other_issue(issue).visible?
+                @messages << l(:warning_relation_permission, id: issue.id)
+                next
+              end
+              if relation.destroy
+                record_relation_change(issue)
+              else
+                @messages << l(:warning_relation_write, id: issue.id, details: relation.errors.full_messages.join(', '))
+              end
+            end
+          else
+            raw.to_s.split(',').map(&:strip).reject(&:blank?).uniq.each do |value|
+              begin
+                targets = relation_targets(value, entry[:row], internal_index, issue)
+                # Load once for this value, rather than re-reading all links
+                # for every target in a many-target batch.
+                existing_ids = issue.reload.relations.select { |relation| relation.relation_type_for(issue) == type }
+                                    .map { |relation| relation.other_issue(issue).id }.to_set
+                targets.each do |target|
+                  report_progress
+                  next if existing_ids.include?(target.id)
+                  relation = IssueRelation.new(issue_from: issue, issue_to: target, relation_type: type)
+                  if relation.save
+                    existing_ids.add(target.id)
+                    record_relation_change(issue)
+                  else
+                    @messages << l(:warning_relation_write, id: issue.id, details: relation.errors.full_messages.join(', '))
+                  end
+                end
+              rescue RedmineImporter::RelationTargets::Missing
+                @messages << l(:warning_relation_missing, id: issue.id, value: value, column: column)
+              rescue RedmineImporter::RelationTargets::Ambiguous => error
+                details = error.candidates.map { |candidate| "##{candidate.id} (#{candidate.tracker.name})" }.join(', ')
+                @messages << l(:warning_relation_candidates, id: issue.id, value: value, column: column, candidates: details)
+              rescue RedmineImporter::RelationTargets::LimitExceeded
+                @messages << l(:warning_relation_limit, id: issue.id, value: value, column: column,
+                               targets: RedmineImporter::RelationTargets::MAX_TARGETS,
+                               candidates: RedmineImporter::RelationTargets::MAX_CANDIDATES)
+              end
+            end
+          end
+        end
+      end
     end
   end
 
@@ -2677,7 +2831,7 @@ class ImporterController < ApplicationController
 
   # Builds the importer query for the unique value, narrowed down with the
   # selected scope custom fields.
-  def build_unique_query(unique_attr, operator, value, row_data)
+  def build_unique_query(unique_attr, operator, value, row_data, scope_filters: nil)
     query = new_importer_query
     query.add_filter('status_id', '*', [1])
     query.add_filter(unique_attr, operator, [value])
@@ -2688,7 +2842,7 @@ class ImporterController < ApplicationController
     end
 
     # narrow the matching scope down with the selected custom fields
-    unique_scope_filters(row_data).each do |filter, filter_operator, values|
+    (scope_filters || unique_scope_filters(row_data)).each do |filter, filter_operator, values|
       query.add_filter(filter, filter_operator, values)
 
       unless query.filters.key?(filter)
